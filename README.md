@@ -1,6 +1,6 @@
 # JobApplications
 
-An Express backend paired with an Angular frontend (in `frontend/`, a separate git repository), including an automation feature that logs into [jobup.ch](https://www.jobup.ch) on demand.
+An Express backend paired with an Angular frontend (in `frontend/`), including an automation feature that logs into [jobup.ch](https://www.jobup.ch) on demand.
 
 ## Prerequisites
 
@@ -58,4 +58,4 @@ cd frontend && npm test      # Angular unit tests
 
 ## Repository structure
 
-This is two separate git repositories: the root of this repo (the Express backend, root-level Playwright tests, and the login automation script), and `frontend/` (the Angular app), which has its own `.git` and its own history.
+Single git repository: the Express backend, root-level Playwright tests, and the login automation script live at the root, and `frontend/` (the Angular app) is a plain subdirectory.
