@@ -1,0 +1,21 @@
+<main class="main">
+  <h1>{{ title() }}</h1>
+  <p>
+    Backend status:
+    <span class="status" [class.status--connected]="backendStatus() === 'connected'"
+                          [class.status--unreachable]="backendStatus() === 'unreachable'">
+      {{ backendStatus() }}
+    </span>
+  </p>
+
+  <div class="login-section">
+    <button type="button" (click)="onLoginClick()" [disabled]="loginPending()">
+      {{ loginPending() ? 'Logging in…' : 'Login' }}
+    </button>
+    @if (loginResult()) {
+      <span class="login-result">{{ loginResult() }}</span>
+    }
+  </div>
+</main>
+
+<router-outlet />
