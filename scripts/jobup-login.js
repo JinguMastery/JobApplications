@@ -38,6 +38,29 @@ async function dismissCookieConsent(page) {
   }
 }
 
+/**
+ * Drives the login flow on an already-open `page` (assumed to already be on jobup.ch with
+ * cookie consent dismissed) and returns whether it succeeded. Split out from `loginToJobup` so
+ * other scripts (e.g. scripts/jobup-cv-match.js) can log in and keep using the same page/browser
+ * afterward instead of having it closed for them.
+ */
+async function performLogin(page, email, password) {
+  await page.getByRole('button', { name: /se connecter/i }).first().click();
+  await page.getByRole('textbox', { name: /adresse e-mail/i }).fill(email);
+  await page.getByRole('button', { name: 'Continuer', exact: true }).click();
+
+  await page.getByRole('textbox', { name: /mot de passe/i }).fill(password);
+  await page.getByRole('button', { name: 'Continuer', exact: true }).click();
+
+  const errorMessage = page.getByText(/e-mail ou mot de passe incorrect/i);
+  const outcome = await Promise.race([
+    page.waitForURL((url) => !url.hostname.includes('auth.jobup.ch'), { timeout: 20000 }).then(() => 'success'),
+    errorMessage.waitFor({ state: 'visible', timeout: 20000 }).then(() => 'failure'),
+  ]).catch(() => 'timeout');
+
+  return outcome === 'success';
+}
+
 async function loginToJobup(email, password) {
   const browser = await chromium.launch();
   try {
@@ -46,40 +69,33 @@ async function loginToJobup(email, password) {
 
     await dismissCookieConsent(page);
 
-    await page.getByRole('button', { name: /se connecter/i }).first().click();
-    await page.getByRole('textbox', { name: /adresse e-mail/i }).fill(email);
-    await page.getByRole('button', { name: 'Continuer', exact: true }).click();
-
-    await page.getByRole('textbox', { name: /mot de passe/i }).fill(password);
-    await page.getByRole('button', { name: 'Continuer', exact: true }).click();
-
-    const errorMessage = page.getByText(/e-mail ou mot de passe incorrect/i);
-    const outcome = await Promise.race([
-      page.waitForURL((url) => !url.hostname.includes('auth.jobup.ch'), { timeout: 20000 }).then(() => 'success'),
-      errorMessage.waitFor({ state: 'visible', timeout: 20000 }).then(() => 'failure'),
-    ]).catch(() => 'timeout');
-
-    return outcome === 'success';
+    return await performLogin(page, email, password);
   } finally {
     await browser.close();
   }
 }
 
-(async () => {
-  const email = process.env.JOBUP_EMAIL;
-  const password = process.env.JOBUP_PASSWORD;
+module.exports = { dismissCookieConsent, performLogin, loginToJobup };
 
-  if (!email || !password) {
-    console.error('JOBUP_EMAIL and JOBUP_PASSWORD environment variables are required.');
-    process.stdout.write(JSON.stringify({ success: false }));
-    return;
-  }
+// Only run as a standalone CLI when invoked directly (`node scripts/jobup-login.js`), not when
+// required by another script (e.g. scripts/jobup-cv-match.js, which reuses `loginToJobup`).
+if (require.main === module) {
+  (async () => {
+    const email = process.env.JOBUP_EMAIL;
+    const password = process.env.JOBUP_PASSWORD;
 
-  try {
-    const success = await loginToJobup(email, password);
-    process.stdout.write(JSON.stringify({ success }));
-  } catch (err) {
-    console.error(err);
-    process.stdout.write(JSON.stringify({ success: false }));
-  }
-})();
+    if (!email || !password) {
+      console.error('JOBUP_EMAIL and JOBUP_PASSWORD environment variables are required.');
+      process.stdout.write(JSON.stringify({ success: false }));
+      return;
+    }
+
+    try {
+      const success = await loginToJobup(email, password);
+      process.stdout.write(JSON.stringify({ success }));
+    } catch (err) {
+      console.error(err);
+      process.stdout.write(JSON.stringify({ success: false }));
+    }
+  })();
+}

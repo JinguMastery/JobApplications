@@ -9,7 +9,15 @@ export interface HealthResponse {
 }
 
 export interface LoginResponse {
+  success: boolean;
   message: string;
+}
+
+export interface CvMatchResponse {
+  success: boolean;
+  analysis: string | null;
+  jobUrl: string | null;
+  totalJobsCount: number | null;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -22,5 +30,9 @@ export class Api {
 
   login(): Observable<LoginResponse> {
     return this.http.post<LoginResponse>('/api/login', {});
+  }
+
+  cvMatch(jobIndex: number, useBasicSearch: boolean): Observable<CvMatchResponse> {
+    return this.http.post<CvMatchResponse>('/api/cv-match', { jobIndex, useBasicSearch });
   }
 }

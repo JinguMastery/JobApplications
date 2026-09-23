@@ -1,7 +1,7 @@
 <main class="main">
   <h1>{{ title() }}</h1>
   <p>
-    Backend status:
+    Backend status :
     <span class="status" [class.status--connected]="backendStatus() === 'connected'"
                           [class.status--unreachable]="backendStatus() === 'unreachable'">
       {{ backendStatus() }}
@@ -10,10 +10,48 @@
 
   <div class="login-section">
     <button type="button" (click)="onLoginClick()" [disabled]="loginPending()">
-      {{ loginPending() ? 'Logging in…' : 'Login' }}
+      {{ loginPending() ? 'Logging in...' : 'Login' }}
     </button>
     @if (loginResult()) {
       <span class="login-result">{{ loginResult() }}</span>
+    }
+  </div>
+
+  <div class="cv-match-section">
+    <label for="job-index">Job index :</label>
+    <input
+      id="job-index"
+      type="number"
+      [value]="jobIndex()"
+      (input)="onJobIndexInput($event)"
+      [disabled]="cvMatchPending()"
+    />
+    <label for="use-basic-search" class="cv-match-basic-search-label">
+      <input
+        id="use-basic-search"
+        type="checkbox"
+        [checked]="useBasicSearch()"
+        (change)="onUseBasicSearchChange($event)"
+        [disabled]="cvMatchPending()"
+      />
+      Use basic search
+    </label>
+    <button type="button" (click)="onCvMatchClick()" [disabled]="cvMatchPending()">
+      {{ cvMatchPending() ? 'Analyzing...' : 'CV Analysis' }}
+    </button>
+    @if (cvMatchResult()) {
+      <span class="cv-match-result">{{ cvMatchResult() }}</span>
+    }
+    @if (cvMatchTotalJobs() != null) {
+      <p class="cv-match-total-jobs">Number of jobs : {{ cvMatchTotalJobs() }}</p>
+    }
+    @if (cvMatchJobUrl()) {
+      <p class="cv-match-job-link">
+        Link to the job : <a [href]="cvMatchJobUrl()" target="_blank" rel="noopener">{{ cvMatchJobUrl() }}</a>
+      </p>
+    }
+    @if (cvMatchAnalysis()) {
+      <p class="cv-match-analysis">{{ cvMatchAnalysis() }}</p>
     }
   </div>
 </main>
