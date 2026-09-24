@@ -12,28 +12,48 @@
  * CV-match automation" section for the gotchas hit along the way — several elements aren't what
  * their visible label would suggest). If jobup.ch changes and a selector stops matching, re-derive
  * it the same way: run this script directly (`JOBUP_EMAIL=... JOBUP_PASSWORD=... node
- * scripts/jobup-cv-match.js [jobIndex] [useBasicSearch]`) and inspect
+ * scripts/jobup-cv-match.js [jobIndex] [useBasicSearch] [searchTerm] [locationsJson]`) and inspect
  * `page.locator('body').ariaSnapshot()`.
  *
  * Reads credentials from JOBUP_EMAIL / JOBUP_PASSWORD, the 1-based job index to select from
  * `process.argv[2]` (defaults to 1, the first job), and whether to skip straight to the
  * "Recherche d'emploi" sub-nav tab / basic-search entry point instead of the profile-based CTA
  * from `process.argv[3]` (`'true'`/`'1'`; defaults to false, i.e. try the CTA first as usual and
- * only fall back to basic search if it's unavailable). jobup.ch paginates results at JOBS_PER_PAGE
- * (20) per page, so an index beyond the first page clicks a "next page" control that many times
+ * only fall back to basic search if it's unavailable). `process.argv[4]` is a custom search term
+ * (falls back to RECOVERY_SEARCH_TERM when empty — and is ignored entirely whenever "Rechercher
+ * avec mon profil" ends up being used, since that CTA generates its own profile-derived term
+ * server-side); `process.argv[5]` is a JSON-encoded array of custom locations (falls back to
+ * `[LOCATION_SLUG]` when empty/absent), each appended as its own `location=` query param wherever
+ * this file applies a location filter. jobup.ch paginates results at JOBS_PER_PAGE (20) per page,
+ * so an index beyond the first page clicks a "next page" control that many times
  * (deep-linking via a `?page=N` query param doesn't work — see CLAUDE.md) and selects position
- * `((jobIndex - 1) % 20) + 1` on the page it lands on. If the index is not a positive integer or
- * exceeds the number of jobs actually found on its target page, returns success: false without
- * attempting an analysis. Once the analysis text is available, POSTs it as { analysis } to
+ * `((jobIndex - 1) % 20) + 1` on the page it lands on. If the index is not a positive integer
+ * (errorMessage: "Job index must be a positive integer") or exceeds the number of jobs actually
+ * found on its target page (errorMessage: "Job index must not be greater than the number of jobs
+ * found on that page"), returns success: false without attempting an analysis — but only *after*
+ * the search itself has run and `totalJobsCount` is known, so both cases still report it rather
+ * than `null` (an invalid index doesn't mean the search itself found nothing useful to report).
+ * Once the analysis text is available, POSTs it as { analysis, meter, criteria } to
  * `${BACKEND_URL}/api/cv-analysis` (BACKEND_URL defaults to http://localhost:3000) before
- * dismissing the result dialog. Prints a single JSON line to stdout:
- * {"success": true|false, "analysis": string|null, "jobUrl": string|null,
- * "totalJobsCount": number|null}. `jobUrl` is the selected job's own detail-page URL
+ * dismissing the result dialog. `meter` ({ color: 'green'|'yellow'| null, percent: number|null })
+ * and `criteria` ([{ text: string, status: 'green'|'yellow'|'gray' }]) are read straight from the
+ * DOM (icon/fill color, not text) via extractAnalysisStructure() — see its comment for how, since
+ * none of that survives a plain innerText() read. Prints a single JSON line to stdout:
+ * {"success": true|false, "analysis": string|null, "meter": object|null, "criteria": array,
+ * "jobUrl": string|null, "totalJobsCount": number|null, "errorMessage": string|null}. `jobUrl` is
+ * the selected job's own detail-page URL
  * (https://www.jobup.ch/fr/emplois/detail/...), read from the job link's `href` before clicking
  * it — jobup.ch renders the job detail in place rather than navigating there, so the browser's own
  * URL after the click is still the search results page, not the job. `totalJobsCount` is the
- * total-match count read from the "... offres d'emploi" text near the top of the results page.
- * Diagnostic output goes to stderr so stdout stays parseable.
+ * total-match count read from the "... offres d'emploi" text near the top of the results page —
+ * except when that text's own number comes out to JOBS_PER_PAGE (20) or less, in which case every
+ * matching job fits on this one page already, so the actual rendered job cards are counted
+ * directly and trusted over that text instead (confirmed live: the text can be wrong on a small
+ * result set — seen reporting 1 while 3 distinct cards were actually rendered).
+ * `errorMessage` is non-null only for specific, expected failures meant to be shown to the user
+ * as-is (see the jobIndex cases above, and EmptyResultsError below for the 0-results case); it's
+ * null on every other path, including genuinely unexpected errors. Diagnostic output goes to
+ * stderr so stdout stays parseable.
  */
 
 const { chromium } = require('playwright');
@@ -47,23 +67,111 @@ const JOBS_PER_PAGE = 20;
 // direct CTA path, because that path's "Rechercher avec mon profil" auto-generates a
 // profile-derived search term server-side that this recovery UI never receives. Filling in this
 // fixed keyword compensates for that (a real profile-derived term isn't available to this script).
-const RECOVERY_SEARCH_TERM = 'développeur';
+const RECOVERY_SEARCH_TERM = 'Développeur';
 
 // The location applied via the `location=<slug>` query param (see the comment where it's used,
 // below) — confirmed live as a real, working slug: `location=genève` returns genuinely
 // Genève-filtered results (e.g. "10 Offres d'emploi Développeur à Genève").
 const LOCATION_SLUG = 'Genève';
 
-async function sendAnalysisToBackend(analysis) {
+// Appends one `location=` query param per entry, as requested (multiple repeated `location=`
+// params rather than one comma-joined value). Only a single `location=<slug>` value was ever
+// confirmed live (see the location-filtering gotcha above/in CLAUDE.md) — this hasn't been
+// re-verified with more than one location at once, so if jobup.ch turns out not to support
+// multiple `location` params the same way, re-derive it live the usual way.
+function appendLocations(url, locations) {
+  for (const location of locations) {
+    url.searchParams.append('location', location);
+  }
+}
+
+async function sendAnalysisToBackend(analysis, meter, criteria) {
   const response = await fetch(BACKEND_URL + '/api/cv-analysis', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ analysis }),
+    body: JSON.stringify({ analysis, meter, criteria }),
   });
 
   if (!response.ok) {
     throw new Error('Backend responded with ' + response.status + ' while posting CV analysis');
   }
+}
+
+// Reads the analysis modal's per-criterion status icons and overall match meter, none of which
+// survive a plain .innerText() read (they're conveyed only by icon/fill color, not text). Derived
+// from a user-supplied live DOM dump of the modal rather than a run of this script itself (no
+// jobup.ch session was available to verify it end-to-end the usual way — see the file header) —
+// if these ever stop matching, re-derive them the documented way: dump `.icon--iconSize_sm` class
+// values and "bg_yellow"/"bg_green" candidate classes via the criteria.length === 0 / meter === null
+// diagnostics in readAnalysisAndClose() below, or a fresh live DOM dump.
+//
+// Status icons: each criterion row has one `<span class="c_green.400 ... icon icon--iconSize_sm">`
+// (met), `c_yellow.300` (partially met) or `c_gray.700` (not met) wrapping a decorative
+// (aria-hidden, textless) SVG — so the icon's own parent element's innerText is exactly that row's
+// title (plus its explanation line, if jobup's AI gave one), with no icon noise mixed in.
+//
+// Meter: one colored fill div (originally seen nested in a "bg_gray.200" gray track div) whose own
+// class gives both the overall-match color ("bg_green..." / "bg_yellow...") and its width as a
+// Panda-CSS fraction token (e.g. "w_1/3") or arbitrary-value token (e.g. "w_[45%]") — found by
+// searching the fill's own class directly (see the comment on the search below for why, having
+// first shipped a version that went via the track and silently failed live).
+async function extractAnalysisStructure(analysisDialog) {
+  return analysisDialog.evaluate((root) => {
+    function classifyStatus(cls) {
+      if (!cls) return null;
+      if (cls.includes('c_green')) return 'green';
+      if (cls.includes('c_yellow')) return 'yellow';
+      if (cls.includes('c_gray')) return 'gray';
+      return null;
+    }
+
+    function parseWidthPercent(cls) {
+      const fraction = cls.match(/w_(\d+)\/(\d+)/);
+      if (fraction) {
+        return Math.round((Number(fraction[1]) / Number(fraction[2])) * 100);
+      }
+      const arbitrary = cls.match(/w_\[(\d+(?:\.\d+)?)%?\]/);
+      if (arbitrary) {
+        return Math.round(Number(arbitrary[1]));
+      }
+      return null;
+    }
+
+    // Searches directly for the *fill* div (its own class carries both the color and the width),
+    // rather than first locating a "bg_gray.200" track ancestor — the modal can contain other
+    // bg_gray.200-classed elements for unrelated purposes, and querySelector() would silently
+    // grab the wrong one (yielding a false-negative null meter) if one of those happens to sit
+    // earlier in the DOM. A "bg_green.../bg_yellow..." element that also carries a parseable width
+    // token is specific enough to the meter fill to not need the track as a scoping step at all.
+    let meter = null;
+    for (const candidate of root.querySelectorAll('[class*="bg_yellow"], [class*="bg_green"]')) {
+      const cls = candidate.getAttribute('class') || '';
+      const percent = parseWidthPercent(cls);
+      if (percent === null) continue;
+      const color = cls.includes('bg_green') ? 'green' : cls.includes('bg_yellow') ? 'yellow' : null;
+      meter = { color, percent };
+      break;
+    }
+
+    const criteria = [];
+    for (const icon of root.querySelectorAll('.icon--iconSize_sm')) {
+      const status = classifyStatus(icon.getAttribute('class') || '');
+      if (!status) continue;
+      let row = icon.parentElement;
+      let text = row ? row.innerText.trim() : '';
+      let hops = 0;
+      while (row && !text && hops < 3) {
+        row = row.parentElement;
+        text = row ? row.innerText.trim() : '';
+        hops++;
+      }
+      if (text) {
+        criteria.push({ text, status });
+      }
+    }
+
+    return { meter, criteria };
+  });
 }
 
 // Removes items whose `href` repeats an earlier one, keeping the first (topmost) occurrence —
@@ -90,34 +198,60 @@ function dedupeByHref(items) {
   return { deduped, duplicateHrefs };
 }
 
-// Waits for at least one job result to render on the current page, or dumps diagnostics and
-// rethrows if none appear. Shared between the initial page-1 wait and, if jobIndex requires
-// pagination, the wait after navigating to the target page.
-async function waitForJobResults(page, anyJobResult, pageLabel) {
-  try {
-    await anyJobResult.first().waitFor({ state: 'visible', timeout: 20000 });
-  } catch (waitErr) {
-    const jobHrefs = await page.locator('a[href*="/emploi/"]').evaluateAll((els) =>
-      els.slice(0, 5).map((el) => ({ href: el.getAttribute('href'), text: el.textContent?.trim().slice(0, 80) }))
-    );
-    const dataCyCandidates = await page.locator('[data-cy]').evaluateAll((els) => {
-      const seen = new Set();
-      for (const el of els) {
-        const v = el.getAttribute('data-cy');
-        if (v && /job|offer|listing|result|card/i.test(v)) seen.add(v);
-      }
-      return [...seen];
-    });
-    console.error(
-      '[jobup-cv-match] could not find a job result on page ' + pageLabel + '. Current URL:',
-      page.url(),
-      'Candidate job links:',
-      JSON.stringify(jobHrefs),
-      'Candidate data-cy values:',
-      JSON.stringify(dataCyCandidates)
-    );
-    throw waitErr;
+// Thrown by waitForJobResults() when jobup.ch itself reports 0 matches for the current
+// term/location combination — distinct from every other failure in this file (a real selector
+// break, a network hiccup, etc.), which stay as plain Errors/TimeoutErrors. runCvMatch()'s single
+// catch for this type is what turns it into an explicit, immediate success:false response instead
+// of running the 20s locator wait all the way out to a generic Playwright TimeoutError.
+class EmptyResultsError extends Error {
+  constructor(pageLabel) {
+    super('jobup.ch reported 0 matching jobs on page ' + pageLabel);
+    this.name = 'EmptyResultsError';
   }
+}
+
+// Waits for at least one job result to render on the current page. Confirmed live: a search with
+// 0 matches (e.g. term/location combination too narrow) renders a `[data-cy="empty-result"]`
+// element instead of any job-link/article element — without racing against it too, the previous
+// version of this function just sat out the full 20s locator timeout and surfaced a generic,
+// unhelpful Playwright TimeoutError for what is actually a normal, expected outcome. Dumps
+// diagnostics and rethrows only if genuinely neither state appears (a real break, not 0 results).
+// Shared between the initial page-1 wait and, if jobIndex requires pagination, the wait after
+// navigating to the target page.
+async function waitForJobResults(page, anyJobResult, pageLabel) {
+  const emptyResult = page.locator('[data-cy="empty-result"]');
+  const outcome = await Promise.race([
+    anyJobResult.first().waitFor({ state: 'visible', timeout: 20000 }).then(() => 'results'),
+    emptyResult.first().waitFor({ state: 'visible', timeout: 20000 }).then(() => 'empty')
+  ]).catch(() => null);
+
+  if (outcome === 'results') {
+    return;
+  }
+  if (outcome === 'empty') {
+    throw new EmptyResultsError(pageLabel);
+  }
+
+  const jobHrefs = await page.locator('a[href*="/emploi/"]').evaluateAll((els) =>
+    els.slice(0, 5).map((el) => ({ href: el.getAttribute('href'), text: el.textContent?.trim().slice(0, 80) }))
+  );
+  const dataCyCandidates = await page.locator('[data-cy]').evaluateAll((els) => {
+    const seen = new Set();
+    for (const el of els) {
+      const v = el.getAttribute('data-cy');
+      if (v && /job|offer|listing|result|card/i.test(v)) seen.add(v);
+    }
+    return [...seen];
+  });
+  console.error(
+    '[jobup-cv-match] could not find a job result on page ' + pageLabel + '. Current URL:',
+    page.url(),
+    'Candidate job links:',
+    JSON.stringify(jobHrefs),
+    'Candidate data-cy values:',
+    JSON.stringify(dataCyCandidates)
+  );
+  throw new Error('Timed out waiting for job results on page ' + pageLabel);
 }
 
 // Reads the analysis dialog's text, posts it to the backend, and dismisses it via "Fermer".
@@ -132,25 +266,68 @@ async function readAnalysisAndClose(page, waitTimeout) {
   await closeButton.waitFor({ state: 'visible', timeout: waitTimeout });
 
   const analysis = (await analysisDialog.innerText()).trim();
+  const { meter, criteria } = await extractAnalysisStructure(analysisDialog);
 
-  await sendAnalysisToBackend(analysis);
+  if (criteria.length === 0) {
+    const iconClasses = await analysisDialog
+      .locator('.icon--iconSize_sm')
+      .evaluateAll((els) => els.slice(0, 10).map((el) => el.getAttribute('class')));
+    console.error(
+      '[jobup-cv-match] extractAnalysisStructure() found 0 criteria; status-icon classes seen:',
+      JSON.stringify(iconClasses)
+    );
+  }
+  if (!meter) {
+    const meterCandidateClasses = await analysisDialog
+      .locator('[class*="bg_yellow"], [class*="bg_green"], [class*="bg_gray.200"]')
+      .evaluateAll((els) => els.slice(0, 10).map((el) => el.getAttribute('class')));
+    console.error(
+      '[jobup-cv-match] extractAnalysisStructure() found no meter; candidate classes seen:',
+      JSON.stringify(meterCandidateClasses)
+    );
+  }
+
+  await sendAnalysisToBackend(analysis, meter, criteria);
 
   await closeButton.click();
 
-  return analysis;
+  return { analysis, meter, criteria };
 }
 
-async function runCvMatch(email, password, jobIndex, useBasicSearch) {
+async function runCvMatch(email, password, jobIndex, useBasicSearch, searchTerm, locations) {
+  // Falls back to the fixed defaults whenever the caller-supplied value is empty/blank — see the
+  // header comment and the individual usages below for why `effectiveSearchTerm` only ever gets
+  // used on paths where "Rechercher avec mon profil" wasn't available in the first place.
+  const effectiveSearchTerm = searchTerm && searchTerm.trim() ? searchTerm.trim() : RECOVERY_SEARCH_TERM;
+  const filteredLocations = (Array.isArray(locations) ? locations : [])
+    .map((location) => String(location).trim())
+    .filter((location) => location.length > 0);
+  const effectiveLocations = filteredLocations.length > 0 ? filteredLocations : [LOCATION_SLUG];
+
   const browser = await chromium.launch();
+  // Declared here (not just inside the try) so the catch block below can still read page.url() for
+  // resultsUrl when an EmptyResultsError is thrown — a `const` declared inside the try body isn't
+  // visible from its own catch block.
+  let page;
   try {
-    const page = await browser.newPage();
+    page = await browser.newPage();
     await page.goto('https://www.jobup.ch/fr/');
 
     await dismissCookieConsent(page);
 
     const loggedIn = await performLogin(page, email, password);
     if (!loggedIn) {
-      return { success: false, analysis: null, jobUrl: null, totalJobsCount: null };
+      // No search was ever run, so there's no results URL to report yet.
+      return {
+        success: false,
+        analysis: null,
+        meter: null,
+        criteria: [],
+        jobUrl: null,
+        totalJobsCount: null,
+        errorMessage: null,
+        resultsUrl: null
+      };
     }
 
     await page.goto('https://www.jobup.ch/fr/emplois/');
@@ -393,18 +570,18 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
         console.error(
           '[jobup-cv-match] entered via the sub-nav tab; "Rechercher avec mon profil" not available ' +
             'in Intelligent search mode either, navigating directly to the Intelligent-search results ' +
-            'URL with RECOVERY_SEARCH_TERM and LOCATION_SLUG instead of filling fields through the UI.'
+            'URL with the effective search term/locations instead of filling fields through the UI.'
         );
         const recoveryUrl = new URL(page.url());
-        recoveryUrl.searchParams.set('term', RECOVERY_SEARCH_TERM);
-        recoveryUrl.searchParams.set('location', LOCATION_SLUG);
+        recoveryUrl.searchParams.set('term', effectiveSearchTerm);
+        appendLocations(recoveryUrl, effectiveLocations);
         await page.goto(recoveryUrl.toString());
         await waitForJobResults(page, anyJobResult, '1 (recovery term+location via URL)');
         skipSearchSubmit = true;
       }
     }
 
-    // On the basic-search recovery UI, fill in RECOVERY_SEARCH_TERM so the search isn't
+    // On the basic-search recovery UI, fill in the effective search term so the search isn't
     // unfiltered by keyword. Confirmed live: this field has no placeholder/aria-label/name at all
     // — just `id="synonym-typeahead-text-field"`. Not fatal if it can't be found/filled — the run
     // still proceeds, just unfiltered by keyword. Skipped entirely when skipSearchSubmit is set —
@@ -419,11 +596,11 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
 
       try {
         await termField.first().waitFor({ state: 'visible', timeout: 8000 });
-        await termField.first().fill(RECOVERY_SEARCH_TERM);
+        await termField.first().fill(effectiveSearchTerm);
         // Filling a typeahead field like this one opens its own suggestions dropdown; Escape
         // dismisses it without picking a suggestion, keeping the typed term.
         await termField.first().press('Escape');
-        console.error('[jobup-cv-match] filled the basic-search term field with "' + RECOVERY_SEARCH_TERM + '".');
+        console.error('[jobup-cv-match] filled the basic-search term field with "' + effectiveSearchTerm + '".');
       } catch {
         const fields = await page.locator('input, [role="combobox"], [role="searchbox"]').evaluateAll((els) =>
           els.map((el) => ({
@@ -444,11 +621,6 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
 
     if (!skipSearchSubmit) {
       await page.getByRole('button', { name: /^recherche$/i }).click();
-    }
-
-    if (!Number.isInteger(jobIndex) || jobIndex < 1) {
-      console.error('[jobup-cv-match] jobIndex ' + jobIndex + ' must be a positive integer.');
-      return { success: false, analysis: null, jobUrl: null, totalJobsCount: null };
     }
 
     // Select the inPageIndex-th (1-based) job offer on the current results page, in the order the
@@ -500,7 +672,7 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
     if (searchWithProfilePath.startsWith('subNavTab')) {
       const locationUrl = new URL(page.url());
       if (!locationUrl.searchParams.get('location')) {
-        locationUrl.searchParams.set('location', LOCATION_SLUG);
+        appendLocations(locationUrl, effectiveLocations);
         await page.goto(locationUrl.toString());
         // Fresh navigation — wait for its results to render too, same reasoning as above.
         await waitForJobResults(page, anyJobResult, '1 (with location)');
@@ -526,6 +698,29 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
       console.error('[jobup-cv-match] could not find/parse the "... offres d\'emploi" total job-count text.');
     }
 
+    // Confirmed live: that "... offres d'emploi" text can be wrong on a small result set (seen:
+    // parsed as 1 while 3 distinct job cards actually rendered on the page) — the text apparently
+    // reflects a different count than what's actually rendered in this case. Whenever the parsed
+    // total is small enough that every match fits on this one page (<= JOBS_PER_PAGE, so no
+    // pagination is involved and every matching card is already in the DOM right here), the actual
+    // rendered job cards are counted directly and trusted over that text instead. Above
+    // JOBS_PER_PAGE this isn't attempted — counting DOM elements only tells you what's on *this*
+    // page, not the true total across every page, so the parsed text remains the only total on hand.
+    if (totalJobsCount !== null && totalJobsCount <= JOBS_PER_PAGE) {
+      const dataCyElements = await dataCyJobLinks.all();
+      const jobElements = dataCyElements.length > 0 ? dataCyElements : await articleJobLinks.all();
+      const hrefs = await Promise.all(jobElements.map((el) => el.getAttribute('href')));
+      const { deduped } = dedupeByHref(jobElements.map((el, i) => ({ href: hrefs[i] })));
+      if (deduped.length !== totalJobsCount) {
+        console.error(
+          '[jobup-cv-match] "... offres d\'emploi" text said ' + totalJobsCount + ' but ' +
+            deduped.length + ' distinct job card(s) are actually rendered on this page — using the ' +
+            'DOM count instead.'
+        );
+        totalJobsCount = deduped.length;
+      }
+    }
+
     // Logged unconditionally for visibility into which search path was used and what it actually
     // found — e.g. to confirm the RECOVERY_SEARCH_TERM fill above landed a reasonably-scoped
     // totalJobsCount rather than the ~36000 (location-filtered only) seen before that fill existed,
@@ -545,6 +740,23 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
       'location param:', JSON.stringify(resultsUrlLocationParam),
       'results URL:', page.url()
     );
+
+    // Validated here rather than before the search even ran, so an invalid jobIndex still reports
+    // totalJobsCount — knowing how many jobs the search itself found is useful context even when
+    // the requested index was never going to be valid.
+    if (!Number.isInteger(jobIndex) || jobIndex < 1) {
+      console.error('[jobup-cv-match] jobIndex ' + jobIndex + ' must be a positive integer.');
+      return {
+        success: false,
+        analysis: null,
+        meter: null,
+        criteria: [],
+        jobUrl: null,
+        totalJobsCount,
+        errorMessage: 'Job index must be a positive integer',
+        resultsUrl: page.url()
+      };
+    }
 
     // jobup.ch paginates results at JOBS_PER_PAGE (20) per page. jobIndex 1-20 is on page 1
     // (where we already are); anything beyond that requires paging forward to reach it.
@@ -682,10 +894,25 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
         '[jobup-cv-match] jobIndex ' + jobIndex + ' (page ' + targetPage + ', position ' + inPageIndex +
           ') is out of range for ' + jobCount + ' job(s) found on that page.'
       );
-      return { success: false, analysis: null, jobUrl: null, totalJobsCount };
+      return {
+        success: false,
+        analysis: null,
+        meter: null,
+        criteria: [],
+        jobUrl: null,
+        totalJobsCount,
+        errorMessage: 'Job index must not be greater than the number of jobs found on that page',
+        resultsUrl: page.url()
+      };
     }
 
     const selectedJob = orderedJobs[inPageIndex - 1];
+
+    // The results *listing* page's own URL (term/location/page=N query params, no `?jobid=...`
+    // yet) — captured here, before clicking the job, so it reflects the actual page the job was
+    // found/selected on rather than whatever state the click below (and the analysis dialog it
+    // opens) leaves the URL in.
+    const resultsUrl = page.url();
 
     // Read the job's real detail URL (https://www.jobup.ch/fr/emplois/detail/...) from the link's
     // own `href` before clicking — jobup.ch renders the job detail in place rather than navigating
@@ -715,15 +942,17 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
     ]).catch(() => null);
 
     let analysis;
+    let meter;
+    let criteria;
     if (which === 'already') {
       await alreadyAnalyzedButton.first().click();
-      analysis = await readAnalysisAndClose(page, 20000);
+      ({ analysis, meter, criteria } = await readAnalysisAndClose(page, 20000));
     } else if (which === 'new') {
       await newAnalysisButton.first().click();
       await page.getByRole('button', { name: 'Continuer', exact: true }).click();
       // The AI analysis can take a while to run; wait generously for "Fermer" to appear, since
       // that signals the result is ready to read (handled inside readAnalysisAndClose).
-      analysis = await readAnalysisAndClose(page, 60000);
+      ({ analysis, meter, criteria } = await readAnalysisAndClose(page, 60000));
     } else {
       const matchCandidates = await page.locator('[data-cy]').evaluateAll((els) => {
         const seen = new Set();
@@ -747,7 +976,25 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
       throw new Error('Could not find either the "already analyzed" or "new analysis" button');
     }
 
-    return { success: true, analysis, jobUrl, totalJobsCount };
+    return { success: true, analysis, meter, criteria, jobUrl, totalJobsCount, errorMessage: null, resultsUrl };
+  } catch (err) {
+    if (err instanceof EmptyResultsError) {
+      const message =
+        "0 job found, search term : '" + effectiveSearchTerm +
+        "', locations : '" + effectiveLocations.join(', ') + "'";
+      console.error('[jobup-cv-match]', message);
+      return {
+        success: false,
+        analysis: null,
+        meter: null,
+        criteria: [],
+        jobUrl: null,
+        totalJobsCount: 0,
+        errorMessage: message,
+        resultsUrl: page ? page.url() : null
+      };
+    }
+    throw err;
   } finally {
     await browser.close();
   }
@@ -758,18 +1005,48 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch) {
   const password = process.env.JOBUP_PASSWORD;
   const jobIndex = process.argv[2] !== undefined ? Number(process.argv[2]) : 1;
   const useBasicSearch = process.argv[3] === 'true' || process.argv[3] === '1';
+  const searchTerm = process.argv[4] || '';
+  let locations = [];
+  try {
+    const parsedLocations = JSON.parse(process.argv[5] || '[]');
+    locations = Array.isArray(parsedLocations) ? parsedLocations : [];
+  } catch {
+    locations = [];
+  }
 
   if (!email || !password) {
     console.error('JOBUP_EMAIL and JOBUP_PASSWORD environment variables are required.');
-    process.stdout.write(JSON.stringify({ success: false, analysis: null, jobUrl: null, totalJobsCount: null }));
+    process.stdout.write(
+      JSON.stringify({
+        success: false,
+        analysis: null,
+        meter: null,
+        criteria: [],
+        jobUrl: null,
+        totalJobsCount: null,
+        errorMessage: null,
+        resultsUrl: null
+      })
+    );
     return;
   }
 
   try {
-    const result = await runCvMatch(email, password, jobIndex, useBasicSearch);
+    const result = await runCvMatch(email, password, jobIndex, useBasicSearch, searchTerm, locations);
     process.stdout.write(JSON.stringify(result));
   } catch (err) {
     console.error(err);
-    process.stdout.write(JSON.stringify({ success: false, analysis: null, jobUrl: null, totalJobsCount: null }));
+    process.stdout.write(
+      JSON.stringify({
+        success: false,
+        analysis: null,
+        meter: null,
+        criteria: [],
+        jobUrl: null,
+        totalJobsCount: null,
+        errorMessage: null,
+        resultsUrl: null
+      })
+    );
   }
 })();

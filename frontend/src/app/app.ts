@@ -1,7 +1,146 @@
-import { afterNextRender, Component, inject, signal } from '@angular/core';
+import { afterNextRender, Component, computed, inject, signal } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
 
-import { Api } from './services/api';
+import { Api, AnalysisCriterion, AnalysisMeter } from './services/api';
+
+type AnalysisListItem = { text: string; status: 'green' | 'yellow' | 'gray' | null };
+
+type AnalysisSegment =
+  | { type: 'heading'; text: string; level: 'title' | 'section' }
+  | { type: 'meter'; color: 'green' | 'yellow' | null; percent: number | null }
+  | { type: 'list'; items: AnalysisListItem[] }
+  | { type: 'paragraph'; text: string };
+
+const BULLET_PATTERN = /^[-•*]\s+(.*)$/;
+const NUMBERED_PATTERN = /^\d+[.)]\s+(.*)$/;
+const COLON_HEADING_PATTERN = /^.{1,70}:$/;
+const SHORT_QUESTION_PATTERN = /^.{1,45}\?$/;
+
+// jobup.ch's own CV-match modal always groups criteria under these two fixed section labels
+// (see the "Un bon départ" screenshots), regardless of what the AI-generated verdict/criteria
+// text says — so they're recognized by name rather than guessed at structurally.
+const KNOWN_SECTION_HEADINGS = new Set([
+  'connaissances, qualifications et compétences importantes',
+  'autres demandes'
+]);
+
+function isSectionHeading(line: string): boolean {
+  return (
+    KNOWN_SECTION_HEADINGS.has(line.toLowerCase()) ||
+    COLON_HEADING_PATTERN.test(line) ||
+    SHORT_QUESTION_PATTERN.test(line)
+  );
+}
+
+// Past this point the modal is just jobup.ch's own boilerplate footer (which CV was used, the
+// "Analysez un autre CV" link, the usefulness survey, the AI disclaimer, "Fermer") rather than
+// analysis content — none of it should be styled as a heading or list item, so parsing stops the
+// moment either fixed lead-in is seen.
+const STOP_MARKERS = [
+  "l'évaluation est basée sur le cv suivant",
+  'avez-vous trouvé cela utile'
+];
+
+function isStopMarker(line: string): boolean {
+  const normalized = line.toLowerCase();
+  return STOP_MARKERS.some((marker) => normalized.startsWith(marker));
+}
+
+// scripts/jobup-cv-match.js reads each criterion's real status (green/yellow/gray) straight from
+// its icon's color class, separately from the plain-text analysis blob below — so a checklist
+// line here is matched back to its criterion by text containment rather than trusting line order
+// (a criterion with an explanation reads as two separate lines below — title, then explanation —
+// while extractAnalysisStructure() captured them together as that criterion's one text block).
+function findCriterionStatus(
+  line: string,
+  criteria: readonly AnalysisCriterion[]
+): 'green' | 'yellow' | 'gray' | null {
+  const normalized = line.trim();
+  if (!normalized) {
+    return null;
+  }
+  for (const criterion of criteria) {
+    const text = criterion.text.trim();
+    if (text === normalized || text.includes(normalized) || normalized.includes(text)) {
+      return criterion.status;
+    }
+  }
+  return null;
+}
+
+// The AI CV-match analysis comes back from the backend as one plain-text blob (see
+// scripts/jobup-cv-match.js's readAnalysisAndClose(), which reads the whole modal's innerText) —
+// this recovers its structure: the first line is jobup's bold verdict title ("Un bon départ"); a
+// known section label (or a short ":"/"?"-terminated line) starts a new heading; every other line
+// found after a heading is one checklist row, rendered as a list item (colored via `criteria`, see
+// findCriterionStatus() above); lines before the first heading (the verdict's intro sentence) stay
+// as their own paragraph. The overall-match meter (`meter`, read from the fill bar's own color/
+// width, not text) is inserted once, right before the first section heading.
+function parseAnalysis(
+  raw: string,
+  criteria: readonly AnalysisCriterion[],
+  meter: AnalysisMeter | null
+): AnalysisSegment[] {
+  const segments: AnalysisSegment[] = [];
+  let listItems: AnalysisListItem[] | null = null;
+  let sawTitle = false;
+  let inSection = false;
+  let meterInserted = false;
+
+  const flushList = () => {
+    if (listItems && listItems.length > 0) {
+      segments.push({ type: 'list', items: listItems });
+    }
+    listItems = null;
+  };
+  const pushListItem = (text: string) => {
+    listItems ??= [];
+    listItems.push({ text, status: findCriterionStatus(text, criteria) });
+  };
+
+  for (const rawLine of raw.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    if (isStopMarker(line)) {
+      break;
+    }
+
+    const bulletMatch = line.match(BULLET_PATTERN) ?? line.match(NUMBERED_PATTERN);
+    if (bulletMatch) {
+      pushListItem(bulletMatch[1]);
+      continue;
+    }
+
+    if (!sawTitle) {
+      segments.push({ type: 'heading', text: line, level: 'title' });
+      sawTitle = true;
+      continue;
+    }
+
+    if (isSectionHeading(line)) {
+      flushList();
+      if (meter && !meterInserted) {
+        segments.push({ type: 'meter', color: meter.color, percent: meter.percent });
+        meterInserted = true;
+      }
+      segments.push({ type: 'heading', text: line, level: 'section' });
+      inSection = true;
+      continue;
+    }
+
+    if (inSection) {
+      pushListItem(line);
+      continue;
+    }
+
+    segments.push({ type: 'paragraph', text: line });
+  }
+  flushList();
+
+  return segments;
+}
 
 @Component({
   selector: 'app-root',
@@ -19,10 +158,20 @@ export class App {
   protected readonly cvMatchPending = signal(false);
   protected readonly cvMatchResult = signal<string | null>(null);
   protected readonly cvMatchAnalysis = signal<string | null>(null);
+  protected readonly cvMatchMeter = signal<AnalysisMeter | null>(null);
+  protected readonly cvMatchCriteria = signal<AnalysisCriterion[]>([]);
   protected readonly cvMatchJobUrl = signal<string | null>(null);
   protected readonly cvMatchTotalJobs = signal<number | null>(null);
+  protected readonly cvMatchResultsUrl = signal<string | null>(null);
   protected readonly jobIndex = signal(1);
+  protected readonly searchTerm = signal('');
+  protected readonly locationInput = signal('');
   protected readonly useBasicSearch = signal(false);
+  protected readonly analysisExpanded = signal(true);
+  protected readonly cvMatchAnalysisSegments = computed(() => {
+    const analysis = this.cvMatchAnalysis();
+    return analysis ? parseAnalysis(analysis, this.cvMatchCriteria(), this.cvMatchMeter()) : [];
+  });
 
   private lastLoginSuccess: boolean | null = null;
   private lastCvMatchSuccess: boolean | null = null;
@@ -62,24 +211,54 @@ export class App {
     this.jobIndex.set(Number.isFinite(value) ? value : 0);
   }
 
+  protected onSearchTermInput(event: Event): void {
+    this.searchTerm.set((event.target as HTMLInputElement).value);
+  }
+
+  protected onLocationInput(event: Event): void {
+    this.locationInput.set((event.target as HTMLInputElement).value);
+  }
+
   protected onUseBasicSearchChange(event: Event): void {
     this.useBasicSearch.set((event.target as HTMLInputElement).checked);
+  }
+
+  protected onToggleAnalysis(): void {
+    this.analysisExpanded.update((expanded) => !expanded);
   }
 
   protected onCvMatchClick(): void {
     this.cvMatchPending.set(true);
     this.cvMatchResult.set(null);
     this.cvMatchAnalysis.set(null);
+    this.cvMatchMeter.set(null);
+    this.cvMatchCriteria.set([]);
     this.cvMatchJobUrl.set(null);
     this.cvMatchTotalJobs.set(null);
-    this.api.cvMatch(this.jobIndex(), this.useBasicSearch()).subscribe({
+    this.cvMatchResultsUrl.set(null);
+    this.analysisExpanded.set(true);
+    const trimmedSearchTerm = this.searchTerm().trim();
+    const locations = this.locationInput()
+      .split(',')
+      .map((location) => location.trim())
+      .filter((location) => location.length > 0);
+    this.api.cvMatch(this.jobIndex(), this.useBasicSearch(), trimmedSearchTerm, locations).subscribe({
       next: (response) => {
-        this.cvMatchResult.set(response.success ? 'Analysis succeeded !' : 'Analysis failed !');
+        // A non-null errorMessage is a specific, expected failure (e.g. jobup.ch reporting 0
+        // matching jobs for the given search term/locations) meant to be shown as-is instead of
+        // the generic fallback.
+        this.cvMatchResult.set(
+          response.success ? 'Analysis succeeded !' : (response.errorMessage ?? 'Analysis failed !')
+        );
         this.cvMatchAnalysis.set(response.success ? response.analysis : null);
+        this.cvMatchMeter.set(response.success ? response.meter : null);
+        this.cvMatchCriteria.set(response.success ? response.criteria : []);
         this.cvMatchJobUrl.set(response.success ? response.jobUrl : null);
-        // Shown regardless of success — knowing the total match count is still useful context
-        // even when the requested job index came back out of range for it.
+        // Shown regardless of success — knowing the total match count (and the results page it
+        // came from) is still useful context even when the requested job index came back out of
+        // range, or the search itself found nothing.
         this.cvMatchTotalJobs.set(response.totalJobsCount);
+        this.cvMatchResultsUrl.set(response.resultsUrl);
         this.lastCvMatchSuccess = response.success;
         this.updateBackendStatusFromActions();
         this.cvMatchPending.set(false);
@@ -87,8 +266,11 @@ export class App {
       error: () => {
         this.cvMatchResult.set('Analysis failed !');
         this.cvMatchAnalysis.set(null);
+        this.cvMatchMeter.set(null);
+        this.cvMatchCriteria.set([]);
         this.cvMatchJobUrl.set(null);
         this.cvMatchTotalJobs.set(null);
+        this.cvMatchResultsUrl.set(null);
         this.lastCvMatchSuccess = false;
         this.updateBackendStatusFromActions();
         this.cvMatchPending.set(false);

@@ -18,6 +18,29 @@
   </div>
 
   <div class="cv-match-section">
+    <div class="cv-match-search-row">
+      <label for="search-term">Search term :</label>
+      <input
+        id="search-term"
+        type="text"
+        maxlength="255"
+        class="cv-match-search-term-input"
+        [value]="searchTerm()"
+        (input)="onSearchTermInput($event)"
+        [disabled]="cvMatchPending()"
+      />
+      <label for="location">Locations :</label>
+      <input
+        id="location"
+        type="text"
+        maxlength="255"
+        class="cv-match-location-input"
+        title="Separate multiple locations with a comma, e.g. Genève, Lausanne"
+        [value]="locationInput()"
+        (input)="onLocationInput($event)"
+        [disabled]="cvMatchPending()"
+      />
+    </div>
     <label for="job-index">Job index :</label>
     <input
       id="job-index"
@@ -42,8 +65,18 @@
     @if (cvMatchResult()) {
       <span class="cv-match-result">{{ cvMatchResult() }}</span>
     }
-    @if (cvMatchTotalJobs() != null) {
-      <p class="cv-match-total-jobs">Number of jobs : {{ cvMatchTotalJobs() }}</p>
+    @if (cvMatchTotalJobs() != null || cvMatchResultsUrl()) {
+      <p class="cv-match-total-jobs">
+        @if (cvMatchTotalJobs() != null) {
+          <span>Number of jobs : {{ cvMatchTotalJobs() }}</span>
+        }
+        @if (cvMatchResultsUrl()) {
+          <span class="cv-match-results-link">
+            Link to the job results page :
+            <a [href]="cvMatchResultsUrl()" target="_blank" rel="noopener">{{ cvMatchResultsUrl() }}</a>
+          </span>
+        }
+      </p>
     }
     @if (cvMatchJobUrl()) {
       <p class="cv-match-job-link">
@@ -51,7 +84,100 @@
       </p>
     }
     @if (cvMatchAnalysis()) {
-      <p class="cv-match-analysis">{{ cvMatchAnalysis() }}</p>
+      <div class="analysis-box">
+        <button
+          type="button"
+          class="analysis-toggle"
+          (click)="onToggleAnalysis()"
+          [attr.aria-expanded]="analysisExpanded()"
+        >
+          <span>CV Analysis</span>
+          <svg
+            class="analysis-toggle-icon"
+            [class.analysis-toggle-icon--expanded]="analysisExpanded()"
+            viewBox="0 0 16 16"
+            width="16"
+            height="16"
+            aria-hidden="true"
+          >
+            <path
+              d="M4 6l4 4 4-4"
+              stroke="currentColor"
+              stroke-width="2"
+              fill="none"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        @if (analysisExpanded()) {
+          <div class="analysis-content">
+            @for (segment of cvMatchAnalysisSegments(); track $index) {
+              @switch (segment.type) {
+                @case ('heading') {
+                  @if (segment.level === 'title') {
+                    <h2 class="analysis-title">{{ segment.text }}</h2>
+                  } @else {
+                    <h3 class="analysis-heading">{{ segment.text }}</h3>
+                  }
+                }
+                @case ('meter') {
+                  <div
+                    class="analysis-meter"
+                    [class.analysis-meter--green]="segment.color === 'green'"
+                    [class.analysis-meter--yellow]="segment.color === 'yellow'"
+                  >
+                    <div class="analysis-meter-fill" [style.width.%]="segment.percent ?? 0"></div>
+                  </div>
+                }
+                @case ('list') {
+                  <ul class="analysis-list">
+                    @for (item of segment.items; track $index) {
+                      <li>
+                        <svg
+                          class="analysis-list-icon"
+                          [class.analysis-list-icon--green]="item.status === 'green'"
+                          [class.analysis-list-icon--yellow]="item.status === 'yellow'"
+                          [class.analysis-list-icon--gray]="item.status === 'gray'"
+                          viewBox="0 0 20 20"
+                          width="20"
+                          height="20"
+                          aria-hidden="true"
+                        >
+                          @if (item.status === 'gray') {
+                            <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" stroke-width="1.5" />
+                            <path
+                              d="M7.3 7.3l5.4 5.4M12.7 7.3l-5.4 5.4"
+                              stroke="currentColor"
+                              stroke-width="1.75"
+                              fill="none"
+                              stroke-linecap="round"
+                            />
+                          } @else {
+                            <circle cx="10" cy="10" r="9" fill="currentColor" />
+                            <path
+                              d="M6 10.5l2.5 2.5 5.5-6"
+                              stroke="#ffffff"
+                              stroke-width="1.75"
+                              fill="none"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                          }
+                        </svg>
+                        <span>{{ item.text }}</span>
+                      </li>
+                    }
+                  </ul>
+                }
+                @case ('paragraph') {
+                  <p class="analysis-paragraph">{{ segment.text }}</p>
+                }
+              }
+            }
+          </div>
+        }
+      </div>
     }
   </div>
 </main>

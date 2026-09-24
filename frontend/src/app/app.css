@@ -1,7 +1,29 @@
 :host {
   display: block;
   padding: 2rem;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  color: #1d1c1a;
+  background: #ffffff;
+}
+
+h1 {
+  font-family: 'Arial Narrow', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica,
+    Arial, sans-serif;
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #1d1c1a;
+  margin: 0 0 0.5rem;
+}
+
+p {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: #1d1c1a;
+  margin: 0 0 0.5rem;
 }
 
 .status {
@@ -33,11 +55,18 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem;
+  gap: 1rem;
 }
 
 .cv-match-result {
   font-weight: 600;
+}
+
+.cv-match-search-row {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
 }
 
 .cv-match-basic-search-label {
@@ -49,6 +78,14 @@
 
 .cv-match-total-jobs {
   flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
+.cv-match-results-link {
+  padding-left: 1rem;
+  word-break: break-all;
 }
 
 .cv-match-job-link {
@@ -56,7 +93,252 @@
   word-break: break-all;
 }
 
-.cv-match-analysis {
+.analysis-box {
   flex-basis: 100%;
-  white-space: pre-line;
+  margin-top: 0.5rem;
+  border: 0.7px solid rgba(29, 28, 26, 0.18);
+  border-radius: 8px;
+  background-color: #ffffff;
+  overflow: hidden;
+}
+
+.analysis-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background-color: transparent;
+  color: #1d1c1a;
+  border: none;
+  border-radius: 0;
+  padding: 0.75rem 1rem;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 24px;
+}
+
+.analysis-toggle:hover:not(:disabled) {
+  background-color: rgba(50, 30, 80, 0.06);
+  border-color: transparent;
+}
+
+.analysis-toggle-icon {
+  flex-shrink: 0;
+  color: #321e50;
+  transition: transform 0.2s ease;
+}
+
+.analysis-toggle-icon--expanded {
+  transform: rotate(-180deg);
+}
+
+.analysis-content {
+  padding: 0 1rem 1rem;
+}
+
+.analysis-title {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #1d1c1a;
+  margin: 0 0 12px;
+}
+
+.analysis-heading {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #1d1c1a;
+  margin: 24px 0 12px;
+}
+
+.analysis-title:first-child,
+.analysis-heading:first-child {
+  margin-top: 0;
+}
+
+.analysis-paragraph {
+  margin: 0 0 12px;
+}
+
+.analysis-meter {
+  height: 17px;
+  max-width: 300px;
+  border-radius: 4px;
+  background-color: #e4e4e4;
+  overflow: hidden;
+  margin: 0 0 12px;
+}
+
+.analysis-meter-fill {
+  height: 100%;
+  background-color: #321e50;
+}
+
+.analysis-meter--green .analysis-meter-fill {
+  background-color: #22c55e;
+}
+
+.analysis-meter--yellow .analysis-meter-fill {
+  background-color: #eab308;
+}
+
+.analysis-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.analysis-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: #1d1c1a;
+}
+
+.analysis-list-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: #321e50;
+}
+
+.analysis-list-icon--green {
+  color: #22c55e;
+}
+
+.analysis-list-icon--yellow {
+  color: #eab308;
+}
+
+.analysis-list-icon--gray {
+  color: #6b7280;
+}
+
+label {
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 400;
+  color: #1d1c1a;
+}
+
+button {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 46px;
+  color: #ffffff;
+  background-color: #321e50;
+  border: 0.7px solid #321e50;
+  border-radius: 24px;
+  padding: 0 16px;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    opacity 0.15s ease;
+}
+
+button:hover {
+  background-color: #4a3170;
+  border-color: #4a3170;
+}
+
+button:focus-visible {
+  outline: 2.75px solid #321e50;
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+input[type='number'],
+input[type='text'] {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 24px;
+  color: #1d1c1a;
+  background-color: #ffffff;
+  border: 0.7px solid rgba(29, 28, 26, 0.18);
+  border-radius: 8px;
+  padding: 1px 16px;
+  height: 48px;
+}
+
+.cv-match-search-term-input,
+.cv-match-location-input {
+  width: 320px;
+}
+
+input[type='number']:focus,
+input[type='text']:focus {
+  outline: none;
+  border-color: #321e50;
+}
+
+input[type='number']:disabled,
+input[type='text']:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+input[type='checkbox'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 26px;
+  height: 26px;
+  margin: 0;
+  border: 1.5px solid rgba(29, 28, 26, 0.18);
+  border-radius: 4px;
+  background-color: #ffffff;
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+input[type='checkbox']:hover {
+  background-color: rgba(50, 30, 80, 0.08);
+}
+
+input[type='checkbox']:checked {
+  background-color: #321e50;
+  border-color: #321e50;
+}
+
+input[type='checkbox']:checked::after {
+  content: '';
+  width: 6px;
+  height: 11px;
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+input[type='checkbox']:focus-visible {
+  outline: 2.75px solid #321e50;
+  outline-offset: 2px;
+}
+
+input[type='checkbox']:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  pointer-events: none;
 }

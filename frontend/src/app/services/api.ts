@@ -13,11 +13,25 @@ export interface LoginResponse {
   message: string;
 }
 
+export interface AnalysisMeter {
+  color: 'green' | 'yellow' | null;
+  percent: number | null;
+}
+
+export interface AnalysisCriterion {
+  text: string;
+  status: 'green' | 'yellow' | 'gray';
+}
+
 export interface CvMatchResponse {
   success: boolean;
   analysis: string | null;
+  meter: AnalysisMeter | null;
+  criteria: AnalysisCriterion[];
   jobUrl: string | null;
   totalJobsCount: number | null;
+  errorMessage: string | null;
+  resultsUrl: string | null;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -32,7 +46,17 @@ export class Api {
     return this.http.post<LoginResponse>('/api/login', {});
   }
 
-  cvMatch(jobIndex: number, useBasicSearch: boolean): Observable<CvMatchResponse> {
-    return this.http.post<CvMatchResponse>('/api/cv-match', { jobIndex, useBasicSearch });
+  cvMatch(
+    jobIndex: number,
+    useBasicSearch: boolean,
+    searchTerm: string,
+    locations: string[]
+  ): Observable<CvMatchResponse> {
+    return this.http.post<CvMatchResponse>('/api/cv-match', {
+      jobIndex,
+      useBasicSearch,
+      searchTerm,
+      locations
+    });
   }
 }
