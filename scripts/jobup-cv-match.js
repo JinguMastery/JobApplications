@@ -12,8 +12,8 @@
  * CV-match automation" section for the gotchas hit along the way — several elements aren't what
  * their visible label would suggest). If jobup.ch changes and a selector stops matching, re-derive
  * it the same way: run this script directly (`JOBUP_EMAIL=... JOBUP_PASSWORD=... node
- * scripts/jobup-cv-match.js [jobIndex] [useBasicSearch] [searchTerm] [locationsJson]`) and inspect
- * `page.locator('body').ariaSnapshot()`.
+ * scripts/jobup-cv-match.js [jobIndex] [useBasicSearch] [searchTerm] [locationsJson] [saveJob]
+ * [easyApply] [ignoreYellowMeter]`) and inspect `page.locator('body').ariaSnapshot()`.
  *
  * Reads credentials from JOBUP_EMAIL / JOBUP_PASSWORD, the 1-based job index to select from
  * `process.argv[2]` (defaults to 1, the first job), and whether to skip straight to the
@@ -52,8 +52,24 @@
  * result set — seen reporting 1 while 3 distinct cards were actually rendered).
  * `errorMessage` is non-null only for specific, expected failures meant to be shown to the user
  * as-is (see the jobIndex cases above, and EmptyResultsError below for the 0-results case); it's
- * null on every other path, including genuinely unexpected errors. Diagnostic output goes to
- * stderr so stdout stays parseable.
+ * null on every other path, including genuinely unexpected errors.
+ *
+ * If the analysis's meter is present at all (green *or* yellow — only its absence, the "Vos
+ * talents correspondent mieux à d'autres opportunités" heading, skips this outright),
+ * prepareJobApplicationDraft() saves the job ("Sauvegarder") when `saveJob` is true and, when
+ * `easyApply` is true and "Candidature simplifiée"/"Continuer ma candidature" is available on the
+ * job page, opens it — in a new tab, handled via the same BrowserContext.waitForEvent('page'), no
+ * separate script/browser needed — and prepares (never submits) a draft application there:
+ * generates a cover letter via "Générer" if the field is required and empty, attaches
+ * REQUIRED_DOCUMENT_NAMES from the profile if not already present, answers every yes/no question
+ * "Oui", then clicks "Sauvegarder" on the application itself. `ignoreYellowMeter`, when true,
+ * additionally skips both actions entirely for a yellow meter (only green then qualifies); when
+ * false (the default), both green and yellow are treated the same. `saveJob`/`easyApply` gate
+ * their two actions independently — either, both, or neither can be enabled. None of this — nor
+ * the meter/criteria extraction it depends on — has been verified against the live site (no
+ * jobup.ch session was available in this environment); a failure here is logged and swallowed
+ * rather than failing the run, since the analysis itself already succeeded by that point.
+ * Diagnostic output goes to stderr so stdout stays parseable.
  */
 
 const { chromium } = require('playwright');
@@ -73,6 +89,15 @@ const RECOVERY_SEARCH_TERM = 'Développeur';
 // below) — confirmed live as a real, working slug: `location=genève` returns genuinely
 // Genève-filtered results (e.g. "10 Offres d'emploi Développeur à Genève").
 const LOCATION_SLUG = 'Genève';
+
+// The three profile documents attached to a draft application whenever prepareJobApplicationDraft()
+// runs (see its comment) — skipped individually if already present as a link on the application
+// page. Exact filenames as they appear in the jobup.ch profile's document picker.
+const REQUIRED_DOCUMENT_NAMES = [
+  'Certificat de travail L HERAULT 2026.04.pdf',
+  'Diplôme Bachelor 2020.pdf',
+  'LR-ITADV.pdf'
+];
 
 // Appends one `location=` query param per entry, as requested (multiple repeated `location=`
 // params rather than one comma-joined value). Only a single `location=<slug>` value was ever
@@ -294,7 +319,528 @@ async function readAnalysisAndClose(page, waitTimeout) {
   return { analysis, meter, criteria };
 }
 
-async function runCvMatch(email, password, jobIndex, useBasicSearch, searchTerm, locations) {
+// If the cover-letter field is present, required (an errorMain-colored "*" span somewhere near its
+// label), and still empty, clicks "Générer" to have jobup.ch generate one. Left untouched if it's
+// not required or already has content. None of this has been verified live (see the header comment
+// and prepareJobApplicationDraft()'s comment) — the required-marker class
+// (`c_colorPalette.errorMain`) and label text come from a user-supplied live DOM snippet, but the
+// walk from label to marker/textarea is a best-effort guess at the surrounding structure. Every
+// `.first()` below is scoped `.and(applicationPage.locator(':visible'))` — confirmed live elsewhere
+// on this page (the job-page "Sauvegarder" button) that jobup.ch duplicates markup (even a whole
+// duplicated `id`) for responsive mobile/desktop layouts and hides one copy via an ancestor, which
+// `.first()` alone can't tell apart from the real, on-screen one.
+async function generateCoverLetterIfNeeded(applicationPage) {
+  const visible = applicationPage.locator(':visible');
+  const label = applicationPage
+    .getByText('Écrivez votre lettre de motivation ici', { exact: false })
+    .and(visible)
+    .first();
+  const labelVisible = await label.isVisible({ timeout: 10000 }).catch(() => false);
+  if (!labelVisible) {
+    console.error('[jobup-cv-match] cover-letter label not found on the application page; skipping.');
+    return;
+  }
+
+  // Walk up from the label a few levels looking for both the required-marker span and the actual
+  // text field, since the exact DOM depth between them isn't known — stop as soon as either is
+  // found, or after a handful of hops. Confirmed live this over-matched at 6 hops: a cover letter
+  // that visibly has no asterisk still got treated as required, because by the 5th/6th hop the
+  // container had grown large enough to also contain some *other*, unrelated field's own required
+  // marker elsewhere on the form. Cut down to 2 hops — a real miss (field genuinely required but
+  // the marker sits further away structurally) is the safer failure mode here than generating an
+  // unwanted cover letter, and the diagnostic dump below shows exactly what was found if this
+  // still needs recalibrating.
+  let container = label;
+  let isRequired = false;
+  let hasExistingText = false;
+  let matchedMarkerHtml = null;
+  let fieldLocator = null;
+  for (let hops = 0; hops < 2; hops++) {
+    container = container.locator('xpath=..');
+    const markers = container.locator('[class~="c_colorPalette.errorMain"]').and(visible);
+    isRequired = (await markers.count()) > 0;
+    if (isRequired && !matchedMarkerHtml) {
+      matchedMarkerHtml = await markers.first().evaluate((el) => el.outerHTML).catch(() => null);
+    }
+    const field = container.locator('textarea, [contenteditable="true"]').and(visible).first();
+    if (await field.isVisible().catch(() => false)) {
+      fieldLocator = field;
+      const value =
+        (await field.inputValue().catch(() => null)) ?? (await field.textContent().catch(() => ''));
+      hasExistingText = !!(value && value.trim());
+    }
+    if (isRequired || hasExistingText) {
+      break;
+    }
+  }
+
+  if (!isRequired) {
+    // Not required — but if it already has content (e.g. left over from an earlier, possibly
+    // over-eager run — see the false-positive-required gotcha this same function used to have),
+    // clear it too, so an optional cover letter is only ever present when actually meant to be.
+    if (hasExistingText && fieldLocator) {
+      await clearCoverLetterField(fieldLocator);
+    } else {
+      console.error('[jobup-cv-match] cover-letter field is not marked required; leaving it as-is.');
+    }
+    return;
+  }
+  console.error(
+    '[jobup-cv-match] cover-letter field detected as required; marker found:',
+    matchedMarkerHtml
+  );
+  if (hasExistingText) {
+    console.error('[jobup-cv-match] cover letter already has content; not regenerating.');
+    return;
+  }
+
+  const generateButton = applicationPage.getByRole('button', { name: /générer/i }).and(visible);
+  if (await generateButton.first().isVisible({ timeout: 5000 }).catch(() => false)) {
+    await generateButton.first().click();
+    console.error('[jobup-cv-match] clicked "Générer" for the cover letter.');
+    // Generation likely takes a moment; give it a window but don't fail the whole draft if it
+    // doesn't finish — the rest of the draft (documents, questions) can still be prepared.
+    await applicationPage.waitForTimeout(5000);
+  } else {
+    console.error('[jobup-cv-match] cover-letter field is required but no "Générer" button was found.');
+  }
+}
+
+// Empties a cover-letter field found to hold leftover content when the field turned out to be
+// optional. `<textarea>` supports .fill(''); a contenteditable div does not, so it's cleared via
+// direct DOM manipulation plus a dispatched 'input' event (the framework listens for that event,
+// not a value/property mutation, to notice the change — the same reasoning as elsewhere in this
+// script where a UI event, not a raw property write, is what the page actually reacts to).
+async function clearCoverLetterField(fieldLocator) {
+  const tagName = await fieldLocator.evaluate((el) => el.tagName).catch(() => null);
+  try {
+    if (tagName === 'TEXTAREA') {
+      await fieldLocator.fill('');
+    } else {
+      await fieldLocator.evaluate((el) => {
+        el.textContent = '';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
+    console.error('[jobup-cv-match] cover-letter field was optional but had leftover content; cleared it.');
+  } catch (err) {
+    console.error('[jobup-cv-match] failed to clear leftover cover-letter content:', err.message);
+  }
+}
+
+// Confirmed live (two real matches, one genuine and one false positive): a genuinely attached
+// document's filename renders as a real `<a href="https://media.jobs.ch/...">` download link, while
+// a still-open "Sélectionner depuis le profil" picker's file options render as plain, href-less
+// `<span class="c_link...">` elements sharing the same link-styled classes — text-alone matching
+// can't tell them apart, but the presence of a real `href` on an `<a>` ancestor can. Walks up to 4
+// hops from the matched text looking for that anchor.
+async function isRealAttachedDocumentLink(locator) {
+  return locator
+    .first()
+    .evaluate((el) => {
+      let node = el;
+      for (let hop = 0; hop < 4 && node; hop++) {
+        if (node.tagName === 'A' && node.getAttribute('href')) {
+          return true;
+        }
+        node = node.parentElement;
+      }
+      return false;
+    })
+    .catch(() => false);
+}
+
+// Attaches each of REQUIRED_DOCUMENT_NAMES via "Ajouter d'autres documents" → "Sélectionner depuis
+// le profil" → the matching filename → "Ajouter", skipping any filename already present as a link
+// on the page. Repeats the whole click sequence per file, per the user's spec. Unverified live —
+// the "Sélectionner depuis le profil" text/class comes from a user-supplied snippet, everything
+// else (button labels) is a best guess pending a real run's diagnostics.
+async function attachMissingDocuments(applicationPage) {
+  const visible = applicationPage.locator(':visible');
+  for (const fileName of REQUIRED_DOCUMENT_NAMES) {
+    const textMatchLocator = applicationPage.getByText(fileName, { exact: true }).and(visible);
+    const textMatched = await textMatchLocator.first().isVisible().catch(() => false);
+    const alreadyAttached = textMatched && (await isRealAttachedDocumentLink(textMatchLocator));
+    if (alreadyAttached) {
+      const matchedHtml = await textMatchLocator
+        .first()
+        .evaluate((el) => (el.closest('[class]') || el).outerHTML.slice(0, 300))
+        .catch(() => null);
+      console.error(
+        '[jobup-cv-match] "' + fileName + '" matched as already attached (real document link); skipping. ' +
+          'Matched element context:',
+        matchedHtml
+      );
+      continue;
+    }
+    if (textMatched) {
+      // Confirmed live: text matched somewhere on the page (e.g. a leftover, still-open
+      // "Sélectionner depuis le profil" picker option) but it isn't a real attached-document link —
+      // don't skip; proceed to attach it for real. Dumped for visibility since this previously
+      // caused a silent false "already attached" skip.
+      const matchedTag = await textMatchLocator.first().evaluate((el) => el.tagName).catch(() => null);
+      console.error(
+        '[jobup-cv-match] "' + fileName + '" text matched (tag: ' + matchedTag + ') but is not a real ' +
+          'attached-document link; proceeding to attach it.'
+      );
+    }
+
+    const addDocsButton = applicationPage.getByRole('button', { name: /ajouter d.autres documents/i }).and(visible);
+    if (!(await addDocsButton.first().isVisible({ timeout: 10000 }).catch(() => false))) {
+      console.error(
+        '[jobup-cv-match] "Ajouter d\'autres documents" button not found; cannot attach "' + fileName + '".'
+      );
+      continue;
+    }
+    await addDocsButton.first().click();
+
+    const selectFromProfile = applicationPage.getByText('Sélectionner depuis le profil', { exact: true }).and(visible);
+    if (!(await selectFromProfile.first().isVisible({ timeout: 10000 }).catch(() => false))) {
+      console.error('[jobup-cv-match] "Sélectionner depuis le profil" not found for "' + fileName + '".');
+      continue;
+    }
+    await selectFromProfile.first().click();
+
+    const fileOption = applicationPage.getByText(fileName, { exact: true }).and(visible);
+    if (!(await fileOption.first().isVisible({ timeout: 10000 }).catch(() => false))) {
+      console.error('[jobup-cv-match] file option "' + fileName + '" not found in the profile picker.');
+      continue;
+    }
+    await fileOption.first().click();
+
+    // Left anchored (unlike the job-page "Sauvegarder" fix above) rather than relaxed to
+    // /ajouter/i: "Ajouter d'autres documents" (a different, already-clicked button) is plausibly
+    // still visible in the same panel at this point, and an unanchored match risks .first()
+    // grabbing *that* one instead of this confirm button — a worse bug than the one it'd fix. If
+    // this exact-match ever turns out to miss the same way "Sauvegarder" did (an aria-label
+    // overriding "Ajouter"), the diagnostics below say exactly what's there instead of guessing.
+    const confirmAddButton = applicationPage.getByRole('button', { name: /^ajouter$/i }).and(visible);
+    if (await confirmAddButton.first().isVisible({ timeout: 10000 }).catch(() => false)) {
+      await confirmAddButton.first().click();
+      console.error('[jobup-cv-match] attached "' + fileName + '".');
+      // Confirmed live (root cause of the false "already attached" positives above, now resolved
+      // with the href-based check): the picker's actual file-list panel can stay open after
+      // "Ajouter" even once `selectFromProfile` (the *menu-item label* that opened it, not the
+      // panel itself) reports hidden — waiting on that label alone isn't a reliable close signal, it
+      // was just closing itself as a one-off menu entry. Kept as an informational wait, but backed
+      // up with an unconditional Escape keypress right after, a generic and low-risk way to force-
+      // close any lingering picker/modal regardless of its concrete DOM structure.
+      await selectFromProfile
+        .first()
+        .waitFor({ state: 'hidden', timeout: 5000 })
+        .catch(() =>
+          console.error(
+            '[jobup-cv-match] "Sélectionner depuis le profil" picker label did not report hidden within ' +
+              '5s after attaching "' + fileName + '".'
+          )
+        );
+      await applicationPage.keyboard.press('Escape').catch(() => {});
+    } else {
+      const buttonInfo = await applicationPage.getByRole('button').evaluateAll((els) =>
+        els.slice(0, 30).map((el) => ({
+          text: el.textContent?.trim().slice(0, 60),
+          ariaLabel: el.getAttribute('aria-label')
+        }))
+      );
+      console.error(
+        '[jobup-cv-match] "Ajouter" confirm button not found for "' + fileName + '". Visible buttons:',
+        JSON.stringify(buttonInfo)
+      );
+    }
+  }
+}
+
+// Best-effort read of a toggle-like element's selected state via aria-pressed/aria-checked/
+// aria-selected, checked on the element itself and up to 2 ancestors (jobup.ch's actual
+// selected-state convention for these Yes/No options is unconfirmed live — this mirrors the
+// aria-pressed pattern already confirmed for the job-page bookmark button elsewhere in this
+// script). Returns true/false when a definite answer is found, or null when unknown.
+async function isOptionSelected(locator) {
+  return locator
+    .evaluate((el) => {
+      let node = el;
+      for (let hop = 0; hop < 3 && node; hop++) {
+        if (node.getAttribute) {
+          for (const attr of ['aria-pressed', 'aria-checked', 'aria-selected']) {
+            const value = node.getAttribute(attr);
+            if (value === 'true') return true;
+            if (value === 'false') return false;
+          }
+        }
+        node = node.parentElement;
+      }
+      return null;
+    })
+    .catch(() => null);
+}
+
+// Clicks every "Oui" option found on the page (one per required yes/no question) — always "Oui",
+// per the user's explicit spec, regardless of what each question actually asks. Re-reads the count
+// fresh (rather than snapshotting elements up front) since clicking one option can shift the DOM.
+// Guards against re-clicking an "Oui" already detected as selected (which would risk toggling it
+// back off), and makes a best-effort attempt to deselect a same-question "Non" first if one is
+// found selected nearby. That "Non"-deselection part is speculative — unverified against jobup.ch's
+// real markup for these questions (no live DOM evidence yet for a "Non" counterpart's structure or
+// its container), so it's scoped to the option's own near ancestors only and never allowed to block
+// selecting "Oui" if it can't cleanly find or click one.
+async function answerYesNoQuestions(applicationPage) {
+  const visible = applicationPage.locator(':visible');
+  const ouiOptions = applicationPage.getByText('Oui', { exact: true }).and(visible);
+  const count = await ouiOptions.count();
+  console.error('[jobup-cv-match] found ' + count + ' "Oui" option(s) to select.');
+  for (let i = 0; i < count; i++) {
+    const ouiOption = ouiOptions.nth(i);
+    try {
+      const ouiSelected = await isOptionSelected(ouiOption);
+      if (ouiSelected === true) {
+        console.error('[jobup-cv-match] "Oui" option #' + (i + 1) + ' already selected; skipping.');
+        continue;
+      }
+
+      let container = ouiOption;
+      for (let hop = 0; hop < 2; hop++) {
+        container = container.locator('xpath=..');
+        const nonOption = container.getByText('Non', { exact: true }).and(visible).first();
+        if (await nonOption.isVisible({ timeout: 1000 }).catch(() => false)) {
+          const nonSelected = await isOptionSelected(nonOption);
+          if (nonSelected === true) {
+            try {
+              await nonOption.click();
+              console.error(
+                '[jobup-cv-match] deselected "Non" for question #' + (i + 1) + ' before selecting "Oui".'
+              );
+            } catch (err) {
+              console.error(
+                '[jobup-cv-match] could not deselect "Non" for question #' + (i + 1) + ':',
+                err.message
+              );
+            }
+          }
+          break;
+        }
+      }
+
+      await ouiOption.click();
+    } catch (err) {
+      console.error('[jobup-cv-match] could not click "Oui" option #' + (i + 1) + ':', err.message);
+    }
+  }
+}
+
+// Runs the whole draft-preparation sequence on the "Candidature simplifiée"/"Continuer ma
+// candidature" tab: generate the cover letter if needed, attach the three standard documents if
+// missing, answer every yes/no question "Oui", then "Sauvegarder" — never the final submit button.
+async function fillApplicationDraft(applicationPage) {
+  await generateCoverLetterIfNeeded(applicationPage);
+  await attachMissingDocuments(applicationPage);
+  await answerYesNoQuestions(applicationPage);
+
+  // Unanchored (not /^sauvegarder$/i): confirmed live on the job page's own "Sauvegarder" button
+  // that jobup.ch gives these an `aria-label` overriding the visible text (e.g. "Sauvegarder
+  // l'emploi"), which an anchored exact-match regex misses entirely — this button may carry a
+  // similarly enriched label, not yet confirmed live either way.
+  const saveButton = applicationPage
+    .getByRole('button', { name: /sauvegarder/i })
+    .and(applicationPage.locator(':visible'));
+  if (await saveButton.first().isVisible({ timeout: 10000 }).catch(() => false)) {
+    // The job-page "Sauvegarder" click turned out to need its confirmation checked via the actual
+    // network response rather than any DOM attribute (see prepareJobApplicationDraft()'s comment —
+    // aria-pressed on the element that was actually clicked didn't reliably reflect a real,
+    // server-confirmed save). This save-draft button's real endpoint isn't known yet, so rather than
+    // guess one, every POST/PUT response seen during and shortly after the click is captured and
+    // logged — the same evidence-gathering approach that identified the bookmark endpoint — so the
+    // real one can be targeted precisely once a live run shows it.
+    const capturedRequests = [];
+    const onResponse = (res) => {
+      const method = res.request().method();
+      if (method === 'POST' || method === 'PUT') {
+        capturedRequests.push(method + ' ' + res.status() + ' ' + res.url());
+      }
+    };
+    applicationPage.on('response', onResponse);
+    await saveButton.first().click();
+    await applicationPage.waitForTimeout(2000);
+    applicationPage.off('response', onResponse);
+    console.error(
+      '[jobup-cv-match] clicked "Sauvegarder" to save the application draft (not submitted). ' +
+        'POST/PUT requests observed:',
+      JSON.stringify(capturedRequests)
+    );
+  } else {
+    console.error('[jobup-cv-match] "Sauvegarder" button not found on the application page; draft may not be saved.');
+  }
+}
+
+// When the CV-match meter is green (a strong match), this saves the job and, if "Candidature
+// simplifiée"/"Continuer ma candidature" is available, opens it (in a new tab — the same
+// BrowserContext.waitForEvent('page') mechanism works fine for this within the same script/browser,
+// no separate automation needed) and prepares (but never submits) a draft application there via
+// fillApplicationDraft(). Never throws — a failure here shouldn't invalidate an already-successful
+// CV-match analysis, so every step is defensive and just logs on failure. None of this has been
+// verified against the live site (no jobup.ch session was available in this environment) — if a
+// selector here doesn't match, re-derive it the documented way: dump the live DOM/ariaSnapshot
+// rather than guessing again.
+async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply, ignoreYellowMeter }) {
+  try {
+    // Called whenever a meter is present at all (green or yellow) — see runCvMatch()'s call site
+    // for why a missing meter ("Vos talents correspondent mieux à d'autres opportunités") skips
+    // this function entirely. This first check handles the one remaining meter-based exclusion:
+    // yellow specifically, only when the user has opted into treating it as not-good-enough.
+    if (ignoreYellowMeter && meterColor === 'yellow') {
+      console.error(
+        '[jobup-cv-match] meter is yellow and "ignore yellow meter" is checked; not saving or applying.'
+      );
+      return;
+    }
+
+    // Confirmed live (user-supplied DOM snippet): this button's accessible name is actually
+    // "Sauvegarder l'emploi", not "Sauvegarder" — it carries an `aria-label` that overrides its
+    // visible text entirely for accessibility purposes, so the previous anchored
+    // `getByRole('button', { name: /^sauvegarder$/i })` matched nothing (that regex requires the
+    // *whole* accessible name to equal "Sauvegarder", not just contain it). Targeted here by its
+    // stable `id`/`data-cy` first instead, per this file's usual "prefer data-cy" convention, with
+    // an unanchored name regex as a last-resort fallback. It's also a toggle
+    // (`aria-pressed="false"`/`"true"`, `data-cy="bookmark-button-unchecked"` when off) — guarded
+    // so a job that's already saved from a previous run doesn't get un-saved by clicking it again.
+    //
+    // Confirmed live (second round): `#vacancy-bookmark-cta-info` matches *two* elements with the
+    // same id — jobup.ch's usual habit of duplicating markup for responsive mobile/desktop layouts
+    // (seen elsewhere in this file for job cards/the filter bar), just with a literally duplicated
+    // id this time rather than a duplicated class. One instance resolves to a 0×0 box (its own
+    // computed style still says `display:flex`/`visibility:visible` — it's an *ancestor* that's
+    // actually hidden) even though the *element itself* isn't marked hidden, so `.first()` on the
+    // unfiltered locator silently grabbed that one and `isVisible()` correctly reported false. Every
+    // candidate below is now scoped to `:visible` so only the real, on-screen instance matches.
+    //
+    // Confirmed live (third round): jobup.ch also has a *second*, unrelated bookmark control for
+    // this exact job — a compact icon-only button (`id="vacancy-bookmark-icon-<jobId>"`,
+    // `data-cy="bookmark-icon-unchecked"`, no visible text) that carries the *same*
+    // `aria-label="Sauvegarder l'emploi"` as the intended `#vacancy-bookmark-cta-info` CTA. The
+    // previous version combined both candidates with `.or()` — a union, not a priority order — so
+    // `.first()` picked whichever of the two happened to come first in DOM order, non-deterministically
+    // landing on the icon variant instead. Its click DID reach jobup.ch's server (confirmed live: the
+    // resulting `POST /api/v1/user/bookmark/job` returned 200) — the save genuinely worked — but its
+    // own `aria-pressed` apparently isn't kept in sync reactively, which is exactly why the previous
+    // aria-pressed-polling confirmation kept reporting failure on an actual success. Fixed two ways:
+    // (1) candidates are now tried in strict priority order (first visible one wins, not a union), so
+    // the specific, confirmed-correct `#vacancy-bookmark-cta-info` is used whenever it's present at
+    // all, and (2) success is confirmed via the actual `POST .../bookmark/job` response status — the
+    // real, server-side ground truth — rather than trusting any particular button's DOM attribute.
+    if (!saveJob) {
+      console.error('[jobup-cv-match] "Save job" is unchecked; not clicking "Sauvegarder".');
+    } else {
+      let saveButton = null;
+      for (const candidate of [
+        page.locator('#vacancy-bookmark-cta-info:visible'),
+        page.locator('[data-cy="bookmark-button-unchecked"]:visible, [data-cy="bookmark-button-checked"]:visible'),
+        page.getByRole('button', { name: /sauvegarder/i }).and(page.locator(':visible'))
+      ]) {
+        if (await candidate.first().isVisible({ timeout: 5000 }).catch(() => false)) {
+          saveButton = candidate.first();
+          break;
+        }
+      }
+
+      if (saveButton) {
+        const alreadySaved = (await saveButton.getAttribute('aria-pressed').catch(() => null)) === 'true';
+        if (alreadySaved) {
+          console.error('[jobup-cv-match] job is already saved (aria-pressed="true"); not toggling it off.');
+        } else {
+          const [bookmarkResponse] = await Promise.all([
+            page
+              .waitForResponse(
+                (res) => res.request().method() === 'POST' && res.url().includes('/api/v1/user/bookmark/job'),
+                { timeout: 8000 }
+              )
+              .catch(() => null),
+            saveButton.click()
+          ]);
+
+          if (bookmarkResponse && bookmarkResponse.ok()) {
+            console.error(
+              '[jobup-cv-match] clicked "Sauvegarder" (save job) — confirmed via POST ' +
+                '/api/v1/user/bookmark/job returning ' + bookmarkResponse.status() + '.'
+            );
+            // Small buffer past the confirmed response so any client-side state update it triggers has
+            // time to settle before this run moves on.
+            await page.waitForTimeout(500);
+          } else {
+            console.error(
+              '[jobup-cv-match] clicked "Sauvegarder" but no successful POST to /api/v1/user/bookmark/job ' +
+                'was observed within 8s' +
+                (bookmarkResponse ? ' (got status ' + bookmarkResponse.status() + ')' : '') +
+                ' — the save may not have registered.'
+            );
+          }
+        }
+      } else {
+        console.error('[jobup-cv-match] "Sauvegarder" button not found/visible on the job page; skipping.');
+      }
+    }
+
+    if (!easyApply) {
+      console.error('[jobup-cv-match] "Easy apply" is unchecked; not preparing an application draft.');
+      return;
+    }
+
+    const applyButton = page
+      .getByRole('button', { name: /candidature simplifiée|continuer ma candidature/i })
+      .and(page.locator(':visible'));
+    const applyButtonVisible = await applyButton.first().isVisible({ timeout: 10000 }).catch(() => false);
+    if (!applyButtonVisible) {
+      // Confirmed live: a job posted via an external/agency application flow (e.g. a staffing
+      // agency) has no "Candidature simplifiée"/"Continuer ma candidature" button at all — its only
+      // apply control is `[data-cy="apply-button-external"]` ("Postuler"), which redirects off
+      // jobup.ch entirely. That's an expected, unsupported case (there's no on-site draft to
+      // prepare), distinct from a genuinely missing/renamed button — logged differently so it's not
+      // mistaken for a bug.
+      const isExternalApply = await page
+        .locator('[data-cy="apply-button-external"]')
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (isExternalApply) {
+        console.error(
+          '[jobup-cv-match] this job only offers an external application ("Postuler", ' +
+            'data-cy="apply-button-external") — no on-site "Candidature simplifiée" flow to prepare a draft in.'
+        );
+      } else {
+        console.error(
+          '[jobup-cv-match] no "Candidature simplifiée"/"Continuer ma candidature" button found; ' +
+            'skipping application draft.'
+        );
+      }
+      return;
+    }
+
+    const [applicationPage] = await Promise.all([
+      page.context().waitForEvent('page', { timeout: 20000 }),
+      applyButton.first().click()
+    ]);
+    await applicationPage.waitForLoadState('domcontentloaded');
+    console.error('[jobup-cv-match] opened the application page in a new tab:', applicationPage.url());
+
+    try {
+      await fillApplicationDraft(applicationPage);
+    } finally {
+      await applicationPage.close();
+    }
+  } catch (err) {
+    console.error('[jobup-cv-match] error while preparing the application draft (analysis result is unaffected):', err);
+  }
+}
+
+async function runCvMatch(
+  email,
+  password,
+  jobIndex,
+  useBasicSearch,
+  searchTerm,
+  locations,
+  saveJob,
+  easyApply,
+  ignoreYellowMeter
+) {
   // Falls back to the fixed defaults whenever the caller-supplied value is empty/blank — see the
   // header comment and the individual usages below for why `effectiveSearchTerm` only ever gets
   // used on paths where "Rechercher avec mon profil" wasn't available in the first place.
@@ -310,7 +856,13 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch, searchTerm,
   // visible from its own catch block.
   let page;
   try {
-    page = await browser.newPage();
+    // Explicit desktop-sized viewport rather than Playwright's default (1280x720 headless) — two
+    // separate confirmed-live bugs now (the job-page "Sauvegarder" button's duplicated markup, see
+    // CLAUDE.md) have come from jobup.ch rendering a different responsive layout than whatever this
+    // script's headless browser happened to fall into, vs. what a live DOM dump taken from a normal
+    // full-size browser window showed. A larger, fixed viewport keeps the desktop layout consistent
+    // regardless of Playwright's own headless default, so this class of mismatch doesn't recur.
+    page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await page.goto('https://www.jobup.ch/fr/');
 
     await dismissCookieConsent(page);
@@ -976,6 +1528,19 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch, searchTerm,
       throw new Error('Could not find either the "already analyzed" or "new analysis" button');
     }
 
+    // A meter of either color (green or yellow) triggers saving/applying — only its *absence*
+    // (the "Vos talents correspondent mieux à d'autres opportunités" heading, no meter rendered at
+    // all) skips this outright; a yellow meter specifically is further gated by ignoreYellowMeter
+    // inside prepareJobApplicationDraft(), and saveJob/easyApply gate the two actions independently.
+    if (meter) {
+      await prepareJobApplicationDraft(page, meter.color, { saveJob, easyApply, ignoreYellowMeter });
+    } else {
+      console.error(
+        '[jobup-cv-match] no meter present (e.g. "Vos talents correspondent mieux à d\'autres ' +
+          'opportunités"); not saving or applying.'
+      );
+    }
+
     return { success: true, analysis, meter, criteria, jobUrl, totalJobsCount, errorMessage: null, resultsUrl };
   } catch (err) {
     if (err instanceof EmptyResultsError) {
@@ -1013,6 +1578,9 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch, searchTerm,
   } catch {
     locations = [];
   }
+  const saveJob = process.argv[6] === 'true' || process.argv[6] === '1';
+  const easyApply = process.argv[7] === 'true' || process.argv[7] === '1';
+  const ignoreYellowMeter = process.argv[8] === 'true' || process.argv[8] === '1';
 
   if (!email || !password) {
     console.error('JOBUP_EMAIL and JOBUP_PASSWORD environment variables are required.');
@@ -1032,7 +1600,17 @@ async function runCvMatch(email, password, jobIndex, useBasicSearch, searchTerm,
   }
 
   try {
-    const result = await runCvMatch(email, password, jobIndex, useBasicSearch, searchTerm, locations);
+    const result = await runCvMatch(
+      email,
+      password,
+      jobIndex,
+      useBasicSearch,
+      searchTerm,
+      locations,
+      saveJob,
+      easyApply,
+      ignoreYellowMeter
+    );
     process.stdout.write(JSON.stringify(result));
   } catch (err) {
     console.error(err);

@@ -46,17 +46,15 @@ export class Api {
     return this.http.post<LoginResponse>('/api/login', {});
   }
 
-  cvMatch(
-    jobIndex: number,
-    useBasicSearch: boolean,
-    searchTerm: string,
-    locations: string[]
-  ): Observable<CvMatchResponse> {
-    return this.http.post<CvMatchResponse>('/api/cv-match', {
-      jobIndex,
-      useBasicSearch,
-      searchTerm,
-      locations
-    });
+  cvMatch(options: {
+    jobIndex: number;
+    useBasicSearch: boolean;
+    searchTerm: string;
+    locations: string[];
+    saveJob: boolean;
+    easyApply: boolean;
+    ignoreYellowMeter: boolean;
+  }): Observable<CvMatchResponse> {
+    return this.http.post<CvMatchResponse>('/api/cv-match', options);
   }
 }

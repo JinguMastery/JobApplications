@@ -49,16 +49,78 @@
       (input)="onJobIndexInput($event)"
       [disabled]="cvMatchPending()"
     />
-    <label for="use-basic-search" class="cv-match-basic-search-label">
-      <input
-        id="use-basic-search"
-        type="checkbox"
-        [checked]="useBasicSearch()"
-        (change)="onUseBasicSearchChange($event)"
+    <div class="job-filters-dropdown">
+      <button
+        type="button"
+        class="job-filters-toggle"
+        (click)="onToggleJobFilters()"
+        [attr.aria-expanded]="jobFiltersExpanded()"
         [disabled]="cvMatchPending()"
-      />
-      Use basic search
-    </label>
+      >
+        <span>Job filters</span>
+        <svg
+          class="analysis-toggle-icon"
+          [class.analysis-toggle-icon--expanded]="jobFiltersExpanded()"
+          viewBox="0 0 16 16"
+          width="16"
+          height="16"
+          aria-hidden="true"
+        >
+          <path
+            d="M4 6l4 4 4-4"
+            stroke="currentColor"
+            stroke-width="2"
+            fill="none"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+      @if (jobFiltersExpanded()) {
+        <div class="job-filters-panel">
+          <label for="use-basic-search" class="job-filters-option">
+            <input
+              id="use-basic-search"
+              type="checkbox"
+              [checked]="useBasicSearch()"
+              (change)="onUseBasicSearchChange($event)"
+              [disabled]="cvMatchPending()"
+            />
+            Use basic search
+          </label>
+          <label for="save-job" class="job-filters-option">
+            <input
+              id="save-job"
+              type="checkbox"
+              [checked]="saveJob()"
+              (change)="onSaveJobChange($event)"
+              [disabled]="cvMatchPending()"
+            />
+            Save job
+          </label>
+          <label for="easy-apply" class="job-filters-option">
+            <input
+              id="easy-apply"
+              type="checkbox"
+              [checked]="easyApply()"
+              (change)="onEasyApplyChange($event)"
+              [disabled]="cvMatchPending()"
+            />
+            Easy apply
+          </label>
+          <label for="ignore-yellow-meter" class="job-filters-option">
+            <input
+              id="ignore-yellow-meter"
+              type="checkbox"
+              [checked]="ignoreYellowMeter()"
+              (change)="onIgnoreYellowMeterChange($event)"
+              [disabled]="cvMatchPending() || (!saveJob() && !easyApply())"
+            />
+            Ignore jobs with a yellow meter <br>(only save/apply for green)
+          </label>
+        </div>
+      }
+    </div>
     <button type="button" (click)="onCvMatchClick()" [disabled]="cvMatchPending()">
       {{ cvMatchPending() ? 'Analyzing...' : 'CV Analysis' }}
     </button>

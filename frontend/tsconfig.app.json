@@ -2,6 +2,7 @@
 /* To learn more about Angular compiler options: https://angular.dev/reference/configs/angular-compiler-options. */
 {
   "extends": "./tsconfig.json",
+  "outDir": "./out-tsc/app",
   "compilerOptions": {
     "types": [
       "node"

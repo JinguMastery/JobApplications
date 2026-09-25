@@ -55,6 +55,13 @@ router.post('/login', function(req, res) {
  * the script falls back to its own RECOVERY_SEARCH_TERM/LOCATION_SLUG defaults for whichever one
  * comes out empty — except `searchTerm`, which the script ignores entirely whenever "Rechercher
  * avec mon profil" ends up being used (that CTA generates its own profile-derived term).
+ * Also takes three more booleans (all default false), passed straight through to the script and
+ * ignored there entirely whenever `meter` comes back null (the "Vos talents correspondent mieux à
+ * d'autres opportunités" no-meter case): `saveJob` (click "Sauvegarder" to save the job),
+ * `easyApply` (open "Candidature simplifiée"/"Continuer ma candidature" and prepare, but never
+ * submit, a draft application there), and `ignoreYellowMeter` (when true, additionally skip both
+ * of the above for a yellow meter specifically — only green then qualifies; when false, green and
+ * yellow are treated the same).
  */
 router.post('/cv-match', function(req, res) {
   var scriptPath = path.join(__dirname, '..', 'scripts', 'jobup-cv-match.js');
@@ -71,10 +78,22 @@ router.post('/cv-match', function(req, res) {
         .filter(function(location) { return typeof location === 'string' && location.trim(); })
         .map(function(location) { return location.trim().slice(0, 255); })
     : [];
+  var saveJob = !!(req.body && req.body.saveJob);
+  var easyApply = !!(req.body && req.body.easyApply);
+  var ignoreYellowMeter = !!(req.body && req.body.ignoreYellowMeter);
 
   execFile(
     'node',
-    [scriptPath, String(jobIndex), String(useBasicSearch), searchTerm, JSON.stringify(locations)],
+    [
+      scriptPath,
+      String(jobIndex),
+      String(useBasicSearch),
+      searchTerm,
+      JSON.stringify(locations),
+      String(saveJob),
+      String(easyApply),
+      String(ignoreYellowMeter)
+    ],
     { timeout: 180000 },
     function(err, stdout, stderr) {
       if (stderr) {
