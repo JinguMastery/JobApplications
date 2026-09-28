@@ -40,7 +40,8 @@
  * DOM (icon/fill color, not text) via extractAnalysisStructure() — see its comment for how, since
  * none of that survives a plain innerText() read. Prints a single JSON line to stdout:
  * {"success": true|false, "analysis": string|null, "meter": object|null, "criteria": array,
- * "jobUrl": string|null, "totalJobsCount": number|null, "errorMessage": string|null}. `jobUrl` is
+ * "jobUrl": string|null, "totalJobsCount": number|null, "errorMessage": string|null,
+ * "resultsUrl": string|null, "applicationUrl": string|null}. `jobUrl` is
  * the selected job's own detail-page URL
  * (https://www.jobup.ch/fr/emplois/detail/...), read from the job link's `href` before clicking
  * it — jobup.ch renders the job detail in place rather than navigating there, so the browser's own
@@ -65,7 +66,12 @@
  * "Oui", then clicks "Sauvegarder" on the application itself. `ignoreYellowMeter`, when true,
  * additionally skips both actions entirely for a yellow meter (only green then qualifies); when
  * false (the default), both green and yellow are treated the same. `saveJob`/`easyApply` gate
- * their two actions independently — either, both, or neither can be enabled. None of this — nor
+ * their two actions independently — either, both, or neither can be enabled. `applicationUrl` is
+ * that opened draft application page's own URL (e.g.
+ * https://www.jobup.ch/fr/application/create/<uuid>/), captured right after the new tab loads, so
+ * the caller can link straight back to the in-progress draft — `null` whenever no draft page was
+ * ever opened (easyApply off, no meter, no applicable button, an error, etc.), same convention as
+ * `jobUrl`/`resultsUrl`. None of this — nor
  * the meter/criteria extraction it depends on — has been verified against the live site (no
  * jobup.ch session was available in this environment); a failure here is logged and swallowed
  * rather than failing the run, since the analysis itself already succeeded by that point.
@@ -73,10 +79,29 @@
  */
 
 const { chromium } = require('playwright');
-const { dismissCookieConsent, performLogin } = require('./jobup-login');
+const { dismissCookieConsent, performLogin, LoginValidationError } = require('./jobup-login');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3000';
 const JOBS_PER_PAGE = 20;
+
+// Set right after chromium.launch() succeeds, cleared once browser.close() has run — lets the
+// SIGTERM/SIGINT handlers below close the browser on the way out instead of leaving it orphaned
+// when routes/api.js's POST /cv-match/stop kills this process early (see killProcessTree() there).
+// This is a best-effort backstop, not the primary cleanup mechanism: on Windows, Node's signal
+// support for SIGTERM is unreliable (per Node's own docs, unlike POSIX platforms) — that's exactly
+// why the stop endpoint also runs `taskkill /T /F` unconditionally, which guarantees the whole
+// process tree (this process and anything it spawned) is gone even if this handler never fires.
+let activeBrowser = null;
+
+async function closeActiveBrowserAndExit(signal) {
+  console.error('received ' + signal + '; closing the browser before exiting.');
+  if (activeBrowser) {
+    await activeBrowser.close().catch(() => {});
+  }
+  process.exit(1);
+}
+process.on('SIGTERM', () => { closeActiveBrowserAndExit('SIGTERM'); });
+process.on('SIGINT', () => { closeActiveBrowserAndExit('SIGINT'); });
 
 // The "Aller à la recherche basique" recovery UI's search ends up with an empty `term` query
 // param — confirmed live: it returned ~36000 jobs (location-filtered only) vs. ~2500-3000 on the
@@ -269,7 +294,7 @@ async function waitForJobResults(page, anyJobResult, pageLabel) {
     return [...seen];
   });
   console.error(
-    '[jobup-cv-match] could not find a job result on page ' + pageLabel + '. Current URL:',
+    'could not find a job result on page ' + pageLabel + '. Current URL:',
     page.url(),
     'Candidate job links:',
     JSON.stringify(jobHrefs),
@@ -298,7 +323,7 @@ async function readAnalysisAndClose(page, waitTimeout) {
       .locator('.icon--iconSize_sm')
       .evaluateAll((els) => els.slice(0, 10).map((el) => el.getAttribute('class')));
     console.error(
-      '[jobup-cv-match] extractAnalysisStructure() found 0 criteria; status-icon classes seen:',
+      'extractAnalysisStructure() found 0 criteria; status-icon classes seen:',
       JSON.stringify(iconClasses)
     );
   }
@@ -307,7 +332,7 @@ async function readAnalysisAndClose(page, waitTimeout) {
       .locator('[class*="bg_yellow"], [class*="bg_green"], [class*="bg_gray.200"]')
       .evaluateAll((els) => els.slice(0, 10).map((el) => el.getAttribute('class')));
     console.error(
-      '[jobup-cv-match] extractAnalysisStructure() found no meter; candidate classes seen:',
+      'extractAnalysisStructure() found no meter; candidate classes seen:',
       JSON.stringify(meterCandidateClasses)
     );
   }
@@ -337,7 +362,7 @@ async function generateCoverLetterIfNeeded(applicationPage) {
     .first();
   const labelVisible = await label.isVisible({ timeout: 10000 }).catch(() => false);
   if (!labelVisible) {
-    console.error('[jobup-cv-match] cover-letter label not found on the application page; skipping.');
+    console.error('cover-letter label not found on the application page; skipping.');
     return;
   }
 
@@ -381,28 +406,28 @@ async function generateCoverLetterIfNeeded(applicationPage) {
     if (hasExistingText && fieldLocator) {
       await clearCoverLetterField(fieldLocator);
     } else {
-      console.error('[jobup-cv-match] cover-letter field is not marked required; leaving it as-is.');
+      console.error('cover-letter field is not marked required; leaving it as-is.');
     }
     return;
   }
   console.error(
-    '[jobup-cv-match] cover-letter field detected as required; marker found:',
+    'cover-letter field detected as required; marker found:',
     matchedMarkerHtml
   );
   if (hasExistingText) {
-    console.error('[jobup-cv-match] cover letter already has content; not regenerating.');
+    console.error('cover letter already has content; not regenerating.');
     return;
   }
 
   const generateButton = applicationPage.getByRole('button', { name: /générer/i }).and(visible);
   if (await generateButton.first().isVisible({ timeout: 5000 }).catch(() => false)) {
     await generateButton.first().click();
-    console.error('[jobup-cv-match] clicked "Générer" for the cover letter.');
+    console.error('clicked "Générer" for the cover letter.');
     // Generation likely takes a moment; give it a window but don't fail the whole draft if it
     // doesn't finish — the rest of the draft (documents, questions) can still be prepared.
     await applicationPage.waitForTimeout(5000);
   } else {
-    console.error('[jobup-cv-match] cover-letter field is required but no "Générer" button was found.');
+    console.error('cover-letter field is required but no "Générer" button was found.');
   }
 }
 
@@ -422,9 +447,9 @@ async function clearCoverLetterField(fieldLocator) {
         el.dispatchEvent(new Event('input', { bubbles: true }));
       });
     }
-    console.error('[jobup-cv-match] cover-letter field was optional but had leftover content; cleared it.');
+    console.error('cover-letter field was optional but had leftover content; cleared it.');
   } catch (err) {
-    console.error('[jobup-cv-match] failed to clear leftover cover-letter content:', err.message);
+    console.error('failed to clear leftover cover-letter content:', err.message);
   }
 }
 
@@ -467,7 +492,7 @@ async function attachMissingDocuments(applicationPage) {
         .evaluate((el) => (el.closest('[class]') || el).outerHTML.slice(0, 300))
         .catch(() => null);
       console.error(
-        '[jobup-cv-match] "' + fileName + '" matched as already attached (real document link); skipping. ' +
+        '"' + fileName + '" matched as already attached (real document link); skipping. ' +
           'Matched element context:',
         matchedHtml
       );
@@ -480,7 +505,7 @@ async function attachMissingDocuments(applicationPage) {
       // caused a silent false "already attached" skip.
       const matchedTag = await textMatchLocator.first().evaluate((el) => el.tagName).catch(() => null);
       console.error(
-        '[jobup-cv-match] "' + fileName + '" text matched (tag: ' + matchedTag + ') but is not a real ' +
+        '"' + fileName + '" text matched (tag: ' + matchedTag + ') but is not a real ' +
           'attached-document link; proceeding to attach it.'
       );
     }
@@ -488,7 +513,7 @@ async function attachMissingDocuments(applicationPage) {
     const addDocsButton = applicationPage.getByRole('button', { name: /ajouter d.autres documents/i }).and(visible);
     if (!(await addDocsButton.first().isVisible({ timeout: 10000 }).catch(() => false))) {
       console.error(
-        '[jobup-cv-match] "Ajouter d\'autres documents" button not found; cannot attach "' + fileName + '".'
+        '"Ajouter d\'autres documents" button not found; cannot attach "' + fileName + '".'
       );
       continue;
     }
@@ -496,14 +521,14 @@ async function attachMissingDocuments(applicationPage) {
 
     const selectFromProfile = applicationPage.getByText('Sélectionner depuis le profil', { exact: true }).and(visible);
     if (!(await selectFromProfile.first().isVisible({ timeout: 10000 }).catch(() => false))) {
-      console.error('[jobup-cv-match] "Sélectionner depuis le profil" not found for "' + fileName + '".');
+      console.error('"Sélectionner depuis le profil" not found for "' + fileName + '".');
       continue;
     }
     await selectFromProfile.first().click();
 
     const fileOption = applicationPage.getByText(fileName, { exact: true }).and(visible);
     if (!(await fileOption.first().isVisible({ timeout: 10000 }).catch(() => false))) {
-      console.error('[jobup-cv-match] file option "' + fileName + '" not found in the profile picker.');
+      console.error('file option "' + fileName + '" not found in the profile picker.');
       continue;
     }
     await fileOption.first().click();
@@ -517,7 +542,7 @@ async function attachMissingDocuments(applicationPage) {
     const confirmAddButton = applicationPage.getByRole('button', { name: /^ajouter$/i }).and(visible);
     if (await confirmAddButton.first().isVisible({ timeout: 10000 }).catch(() => false)) {
       await confirmAddButton.first().click();
-      console.error('[jobup-cv-match] attached "' + fileName + '".');
+      console.error('attached "' + fileName + '".');
       // Confirmed live (root cause of the false "already attached" positives above, now resolved
       // with the href-based check): the picker's actual file-list panel can stay open after
       // "Ajouter" even once `selectFromProfile` (the *menu-item label* that opened it, not the
@@ -530,7 +555,7 @@ async function attachMissingDocuments(applicationPage) {
         .waitFor({ state: 'hidden', timeout: 5000 })
         .catch(() =>
           console.error(
-            '[jobup-cv-match] "Sélectionner depuis le profil" picker label did not report hidden within ' +
+            '"Sélectionner depuis le profil" picker label did not report hidden within ' +
               '5s after attaching "' + fileName + '".'
           )
         );
@@ -543,7 +568,7 @@ async function attachMissingDocuments(applicationPage) {
         }))
       );
       console.error(
-        '[jobup-cv-match] "Ajouter" confirm button not found for "' + fileName + '". Visible buttons:',
+        '"Ajouter" confirm button not found for "' + fileName + '". Visible buttons:',
         JSON.stringify(buttonInfo)
       );
     }
@@ -587,13 +612,13 @@ async function answerYesNoQuestions(applicationPage) {
   const visible = applicationPage.locator(':visible');
   const ouiOptions = applicationPage.getByText('Oui', { exact: true }).and(visible);
   const count = await ouiOptions.count();
-  console.error('[jobup-cv-match] found ' + count + ' "Oui" option(s) to select.');
+  console.error('found ' + count + ' "Oui" option(s) to select.');
   for (let i = 0; i < count; i++) {
     const ouiOption = ouiOptions.nth(i);
     try {
       const ouiSelected = await isOptionSelected(ouiOption);
       if (ouiSelected === true) {
-        console.error('[jobup-cv-match] "Oui" option #' + (i + 1) + ' already selected; skipping.');
+        console.error('"Oui" option #' + (i + 1) + ' already selected; skipping.');
         continue;
       }
 
@@ -607,11 +632,11 @@ async function answerYesNoQuestions(applicationPage) {
             try {
               await nonOption.click();
               console.error(
-                '[jobup-cv-match] deselected "Non" for question #' + (i + 1) + ' before selecting "Oui".'
+                'deselected "Non" for question #' + (i + 1) + ' before selecting "Oui".'
               );
             } catch (err) {
               console.error(
-                '[jobup-cv-match] could not deselect "Non" for question #' + (i + 1) + ':',
+                'could not deselect "Non" for question #' + (i + 1) + ':',
                 err.message
               );
             }
@@ -622,7 +647,7 @@ async function answerYesNoQuestions(applicationPage) {
 
       await ouiOption.click();
     } catch (err) {
-      console.error('[jobup-cv-match] could not click "Oui" option #' + (i + 1) + ':', err.message);
+      console.error('could not click "Oui" option #' + (i + 1) + ':', err.message);
     }
   }
 }
@@ -662,12 +687,12 @@ async function fillApplicationDraft(applicationPage) {
     await applicationPage.waitForTimeout(2000);
     applicationPage.off('response', onResponse);
     console.error(
-      '[jobup-cv-match] clicked "Sauvegarder" to save the application draft (not submitted). ' +
+      'clicked "Sauvegarder" to save the application draft (not submitted). ' +
         'POST/PUT requests observed:',
       JSON.stringify(capturedRequests)
     );
   } else {
-    console.error('[jobup-cv-match] "Sauvegarder" button not found on the application page; draft may not be saved.');
+    console.error('"Sauvegarder" button not found on the application page; draft may not be saved.');
   }
 }
 
@@ -680,6 +705,10 @@ async function fillApplicationDraft(applicationPage) {
 // verified against the live site (no jobup.ch session was available in this environment) — if a
 // selector here doesn't match, re-derive it the documented way: dump the live DOM/ariaSnapshot
 // rather than guessing again.
+// Returns the opened application draft page's URL (e.g.
+// https://www.jobup.ch/fr/application/create/<uuid>/) when a draft was actually prepared there, so
+// the caller can surface a link straight back to it — or null on every path where no draft page was
+// ever opened (easyApply off, no applicable button, an error, etc.).
 async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply, ignoreYellowMeter }) {
   try {
     // Called whenever a meter is present at all (green or yellow) — see runCvMatch()'s call site
@@ -688,9 +717,9 @@ async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply
     // yellow specifically, only when the user has opted into treating it as not-good-enough.
     if (ignoreYellowMeter && meterColor === 'yellow') {
       console.error(
-        '[jobup-cv-match] meter is yellow and "ignore yellow meter" is checked; not saving or applying.'
+        'meter is yellow and "ignore yellow meter" is checked; not saving or applying.'
       );
-      return;
+      return null;
     }
 
     // Confirmed live (user-supplied DOM snippet): this button's accessible name is actually
@@ -727,7 +756,7 @@ async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply
     // all, and (2) success is confirmed via the actual `POST .../bookmark/job` response status — the
     // real, server-side ground truth — rather than trusting any particular button's DOM attribute.
     if (!saveJob) {
-      console.error('[jobup-cv-match] "Save job" is unchecked; not clicking "Sauvegarder".');
+      console.error('"Save job" is unchecked; not clicking "Sauvegarder".');
     } else {
       let saveButton = null;
       for (const candidate of [
@@ -744,7 +773,7 @@ async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply
       if (saveButton) {
         const alreadySaved = (await saveButton.getAttribute('aria-pressed').catch(() => null)) === 'true';
         if (alreadySaved) {
-          console.error('[jobup-cv-match] job is already saved (aria-pressed="true"); not toggling it off.');
+          console.error('job is already saved (aria-pressed="true"); not toggling it off.');
         } else {
           const [bookmarkResponse] = await Promise.all([
             page
@@ -758,7 +787,7 @@ async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply
 
           if (bookmarkResponse && bookmarkResponse.ok()) {
             console.error(
-              '[jobup-cv-match] clicked "Sauvegarder" (save job) — confirmed via POST ' +
+              'clicked "Sauvegarder" (save job) — confirmed via POST ' +
                 '/api/v1/user/bookmark/job returning ' + bookmarkResponse.status() + '.'
             );
             // Small buffer past the confirmed response so any client-side state update it triggers has
@@ -766,7 +795,7 @@ async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply
             await page.waitForTimeout(500);
           } else {
             console.error(
-              '[jobup-cv-match] clicked "Sauvegarder" but no successful POST to /api/v1/user/bookmark/job ' +
+              'clicked "Sauvegarder" but no successful POST to /api/v1/user/bookmark/job ' +
                 'was observed within 8s' +
                 (bookmarkResponse ? ' (got status ' + bookmarkResponse.status() + ')' : '') +
                 ' — the save may not have registered.'
@@ -774,13 +803,13 @@ async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply
           }
         }
       } else {
-        console.error('[jobup-cv-match] "Sauvegarder" button not found/visible on the job page; skipping.');
+        console.error('"Sauvegarder" button not found/visible on the job page; skipping.');
       }
     }
 
     if (!easyApply) {
-      console.error('[jobup-cv-match] "Easy apply" is unchecked; not preparing an application draft.');
-      return;
+      console.error('"Easy apply" is unchecked; not preparing an application draft.');
+      return null;
     }
 
     const applyButton = page
@@ -801,16 +830,16 @@ async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply
         .catch(() => false);
       if (isExternalApply) {
         console.error(
-          '[jobup-cv-match] this job only offers an external application ("Postuler", ' +
+          'this job only offers an external application ("Postuler", ' +
             'data-cy="apply-button-external") — no on-site "Candidature simplifiée" flow to prepare a draft in.'
         );
       } else {
         console.error(
-          '[jobup-cv-match] no "Candidature simplifiée"/"Continuer ma candidature" button found; ' +
+          'no "Candidature simplifiée"/"Continuer ma candidature" button found; ' +
             'skipping application draft.'
         );
       }
-      return;
+      return null;
     }
 
     const [applicationPage] = await Promise.all([
@@ -818,15 +847,18 @@ async function prepareJobApplicationDraft(page, meterColor, { saveJob, easyApply
       applyButton.first().click()
     ]);
     await applicationPage.waitForLoadState('domcontentloaded');
-    console.error('[jobup-cv-match] opened the application page in a new tab:', applicationPage.url());
+    const applicationUrl = applicationPage.url();
+    console.error('opened the application page in a new tab:', applicationUrl);
 
     try {
       await fillApplicationDraft(applicationPage);
     } finally {
       await applicationPage.close();
     }
+    return applicationUrl;
   } catch (err) {
-    console.error('[jobup-cv-match] error while preparing the application draft (analysis result is unaffected):', err);
+    console.error('error while preparing the application draft (analysis result is unaffected):', err);
+    return null;
   }
 }
 
@@ -851,6 +883,7 @@ async function runCvMatch(
   const effectiveLocations = filteredLocations.length > 0 ? filteredLocations : [LOCATION_SLUG];
 
   const browser = await chromium.launch();
+  activeBrowser = browser;
   // Declared here (not just inside the try) so the catch block below can still read page.url() for
   // resultsUrl when an EmptyResultsError is thrown — a `const` declared inside the try body isn't
   // visible from its own catch block.
@@ -867,7 +900,33 @@ async function runCvMatch(
 
     await dismissCookieConsent(page);
 
-    const loggedIn = await performLogin(page, email, password);
+    // performLogin() throws a LoginValidationError subclass specifically when it detects a known,
+    // specific login-flow failure immediately (wrong credentials, or an invalid email format —
+    // see its own comment in scripts/jobup-login.js), rather than returning false, its behavior
+    // for a genuinely unexpected/ambiguous failure. Caught here (checking the shared base class,
+    // not each subclass individually — see LoginValidationError's own comment) so this is reported
+    // the same way every other expected failure in this file is (a non-null errorMessage the
+    // frontend shows as-is), instead of being left to propagate up to the generic catch block
+    // below and losing that specificity.
+    let loggedIn = false;
+    try {
+      loggedIn = await performLogin(page, email, password);
+    } catch (err) {
+      if (err instanceof LoginValidationError) {
+        return {
+          success: false,
+          analysis: null,
+          meter: null,
+          criteria: [],
+          jobUrl: null,
+          totalJobsCount: null,
+          errorMessage: err.message,
+          resultsUrl: null,
+          applicationUrl: null
+        };
+      }
+      throw err;
+    }
     if (!loggedIn) {
       // No search was ever run, so there's no results URL to report yet.
       return {
@@ -878,7 +937,8 @@ async function runCvMatch(
         jobUrl: null,
         totalJobsCount: null,
         errorMessage: null,
-        resultsUrl: null
+        resultsUrl: null,
+        applicationUrl: null
       };
     }
 
@@ -909,7 +969,7 @@ async function runCvMatch(
         .locator('[data-cy="vacancy-search-sub-nav"]')
         .evaluateAll((els) => els.map((el) => el.innerText));
       console.error(
-        '[jobup-cv-match] could not find' + (alsoTried ? ' ' + alsoTried + ', nor' : '') +
+        'could not find' + (alsoTried ? ' ' + alsoTried + ', nor' : '') +
           ' "Recherche d\'emploi" in vacancy-search-sub-nav. Its content:',
         JSON.stringify(subNavContent)
       );
@@ -961,7 +1021,7 @@ async function runCvMatch(
             await jobSearchTab.waitFor({ state: 'visible', timeout: 10000 });
             searchWithProfileButton = jobSearchTab;
             searchWithProfilePath = 'subNavTab';
-            console.error('[jobup-cv-match] falling back to the "Recherche d\'emploi" sub-nav tab.');
+            console.error('falling back to the "Recherche d\'emploi" sub-nav tab.');
           } catch (waitErr) {
             await dumpSubNavAndThrow(waitErr, '"Rechercher avec mon profil"');
           }
@@ -969,7 +1029,7 @@ async function runCvMatch(
       }
     }
 
-    console.error('[jobup-cv-match] entered search flow via path:', searchWithProfilePath);
+    console.error('entered search flow via path:', searchWithProfilePath);
     await searchWithProfileButton.click();
 
     // Declared up front (not just plain values yet — Playwright locators are lazy, they don't
@@ -1033,8 +1093,8 @@ async function runCvMatch(
       const switched = await switchModeIfLinkPresent(basicSearchLink, 10000);
       console.error(
         switched
-          ? '[jobup-cv-match] useBasicSearch: clicked "Aller à la recherche basique".'
-          : '[jobup-cv-match] useBasicSearch: already in Basic search mode (or the link was not ' +
+          ? 'useBasicSearch: clicked "Aller à la recherche basique".'
+          : 'useBasicSearch: already in Basic search mode (or the link was not ' +
               'found); proceeding directly.'
       );
       usedBasicSearchRecovery = true;
@@ -1047,8 +1107,8 @@ async function runCvMatch(
       const switchedToIntelligent = await switchModeIfLinkPresent(goToIntelligentSearchLink);
       console.error(
         switchedToIntelligent
-          ? '[jobup-cv-match] entered via the sub-nav tab; clicked "Aller à la recherche intelligente".'
-          : '[jobup-cv-match] entered via the sub-nav tab, already in Intelligent search mode (or the ' +
+          ? 'entered via the sub-nav tab; clicked "Aller à la recherche intelligente".'
+          : 'entered via the sub-nav tab, already in Intelligent search mode (or the ' +
               'link was not found).'
       );
       if (!switchedToIntelligent) {
@@ -1069,7 +1129,7 @@ async function runCvMatch(
               }))
           );
         console.error(
-          '[jobup-cv-match] mode-switch link not matched; elements mentioning intelligente/basique:',
+          'mode-switch link not matched; elements mentioning intelligente/basique:',
           JSON.stringify(candidates)
         );
       }
@@ -1100,7 +1160,7 @@ async function runCvMatch(
 
       if (foundProfileButton) {
         console.error(
-          '[jobup-cv-match] entered via the sub-nav tab; found "Rechercher avec mon profil" in ' +
+          'entered via the sub-nav tab; found "Rechercher avec mon profil" in ' +
             'Intelligent search mode, using the same flow as the direct-CTA path from here.'
         );
         await profileButtonInIntelligentMode.click();
@@ -1120,7 +1180,7 @@ async function runCvMatch(
         // results URL with `term`/`location` query params set, the same reliable mechanism
         // already used for location filtering and pagination elsewhere in this file.
         console.error(
-          '[jobup-cv-match] entered via the sub-nav tab; "Rechercher avec mon profil" not available ' +
+          'entered via the sub-nav tab; "Rechercher avec mon profil" not available ' +
             'in Intelligent search mode either, navigating directly to the Intelligent-search results ' +
             'URL with the effective search term/locations instead of filling fields through the UI.'
         );
@@ -1152,7 +1212,7 @@ async function runCvMatch(
         // Filling a typeahead field like this one opens its own suggestions dropdown; Escape
         // dismisses it without picking a suggestion, keeping the typed term.
         await termField.first().press('Escape');
-        console.error('[jobup-cv-match] filled the basic-search term field with "' + effectiveSearchTerm + '".');
+        console.error('filled the basic-search term field with "' + effectiveSearchTerm + '".');
       } catch {
         const fields = await page.locator('input, [role="combobox"], [role="searchbox"]').evaluateAll((els) =>
           els.map((el) => ({
@@ -1164,7 +1224,7 @@ async function runCvMatch(
           }))
         );
         console.error(
-          '[jobup-cv-match] could not find a term field on the basic-search UI to fill; proceeding ' +
+          'could not find a term field on the basic-search UI to fill; proceeding ' +
             'unfiltered by keyword. Available inputs:',
           JSON.stringify(fields)
         );
@@ -1231,7 +1291,7 @@ async function runCvMatch(
       }
     } else {
       console.error(
-        '[jobup-cv-match] direct-CTA path: skipping location filtering (known unresolved limitation ' +
+        'direct-CTA path: skipping location filtering (known unresolved limitation ' +
           '— see CLAUDE.md); results below are not location-filtered.'
       );
     }
@@ -1247,7 +1307,7 @@ async function runCvMatch(
       const parsed = digits ? Number(digits.replace(/\D/g, '')) : NaN;
       totalJobsCount = Number.isFinite(parsed) ? parsed : null;
     } catch {
-      console.error('[jobup-cv-match] could not find/parse the "... offres d\'emploi" total job-count text.');
+      console.error('could not find/parse the "... offres d\'emploi" total job-count text.');
     }
 
     // Confirmed live: that "... offres d'emploi" text can be wrong on a small result set (seen:
@@ -1265,7 +1325,7 @@ async function runCvMatch(
       const { deduped } = dedupeByHref(jobElements.map((el, i) => ({ href: hrefs[i] })));
       if (deduped.length !== totalJobsCount) {
         console.error(
-          '[jobup-cv-match] "... offres d\'emploi" text said ' + totalJobsCount + ' but ' +
+          '"... offres d\'emploi" text said ' + totalJobsCount + ' but ' +
             deduped.length + ' distinct job card(s) are actually rendered on this page — using the ' +
             'DOM count instead.'
         );
@@ -1287,7 +1347,7 @@ async function runCvMatch(
       }
     })();
     console.error(
-      '[jobup-cv-match] totalJobsCount:', totalJobsCount,
+      'totalJobsCount:', totalJobsCount,
       'search entry path:', searchWithProfilePath,
       'location param:', JSON.stringify(resultsUrlLocationParam),
       'results URL:', page.url()
@@ -1297,7 +1357,7 @@ async function runCvMatch(
     // totalJobsCount — knowing how many jobs the search itself found is useful context even when
     // the requested index was never going to be valid.
     if (!Number.isInteger(jobIndex) || jobIndex < 1) {
-      console.error('[jobup-cv-match] jobIndex ' + jobIndex + ' must be a positive integer.');
+      console.error('jobIndex ' + jobIndex + ' must be a positive integer.');
       return {
         success: false,
         analysis: null,
@@ -1306,7 +1366,8 @@ async function runCvMatch(
         jobUrl: null,
         totalJobsCount,
         errorMessage: 'Job index must be a positive integer',
-        resultsUrl: page.url()
+        resultsUrl: page.url(),
+        applicationUrl: null
       };
     }
 
@@ -1357,7 +1418,7 @@ async function runCvMatch(
               }))
             );
           console.error(
-            '[jobup-cv-match] could not find a "next page" control going from page ' + currentPage +
+            'could not find a "next page" control going from page ' + currentPage +
               ' to ' + targetPage + '. Pagination-area candidates:',
             JSON.stringify(paginationCandidates)
           );
@@ -1390,7 +1451,7 @@ async function runCvMatch(
       );
       if (duplicateHrefs.length > 0) {
         console.error(
-          '[jobup-cv-match] found ' + duplicateHrefs.length + ' duplicate job-link element(s) on page ' +
+          'found ' + duplicateHrefs.length + ' duplicate job-link element(s) on page ' +
             targetPage + ' (same href, different position — likely a promotional/recommended widget ' +
             'reusing the same data-cy) — deduped:',
           JSON.stringify(duplicateHrefs)
@@ -1412,7 +1473,7 @@ async function runCvMatch(
     // a few times before trusting a fully-dropped result.
     for (let attempt = 0; measured.sorted.length === 0 && measured.dropped.length > 0 && attempt < 3; attempt++) {
       console.error(
-        '[jobup-cv-match] all ' + measured.dropped.length + ' matched job element(s) on page ' + targetPage +
+        'all ' + measured.dropped.length + ' matched job element(s) on page ' + targetPage +
           ' had no bounding box (likely still rendering) — retrying measurement (attempt ' + (attempt + 1) + ').'
       );
       await page.waitForTimeout(750);
@@ -1421,7 +1482,7 @@ async function runCvMatch(
 
     if (measured.usedArticleFallback) {
       console.error(
-        '[jobup-cv-match] no [data-cy="job-link"] elements on page ' + targetPage +
+        'no [data-cy="job-link"] elements on page ' + targetPage +
           '; using role="article" for job selection instead.'
       );
     }
@@ -1433,7 +1494,7 @@ async function runCvMatch(
     // off-screen duplicate (a hidden mobile/desktop responsive twin, per the filter-bar gotcha)
     // still passing the `:visible` check and skewing the sort.
     console.error(
-      '[jobup-cv-match] job order on page ' + targetPage + ':',
+      'job order on page ' + targetPage + ':',
       JSON.stringify(sorted.map((j, i) => ({ position: i + 1, href: j.href, x: j.box.x, y: j.box.y }))),
       dropped.length ? 'dropped (no bounding box, href): ' + JSON.stringify(dropped.map((j) => j.href)) : ''
     );
@@ -1443,7 +1504,7 @@ async function runCvMatch(
     const jobCount = orderedJobs.length;
     if (inPageIndex > jobCount) {
       console.error(
-        '[jobup-cv-match] jobIndex ' + jobIndex + ' (page ' + targetPage + ', position ' + inPageIndex +
+        'jobIndex ' + jobIndex + ' (page ' + targetPage + ', position ' + inPageIndex +
           ') is out of range for ' + jobCount + ' job(s) found on that page.'
       );
       return {
@@ -1454,7 +1515,8 @@ async function runCvMatch(
         jobUrl: null,
         totalJobsCount,
         errorMessage: 'Job index must not be greater than the number of jobs found on that page',
-        resultsUrl: page.url()
+        resultsUrl: page.url(),
+        applicationUrl: null
       };
     }
 
@@ -1518,7 +1580,7 @@ async function runCvMatch(
         els.slice(0, 30).map((el) => el.textContent?.trim().slice(0, 60))
       );
       console.error(
-        '[jobup-cv-match] found neither "Voir l\'analyse" nor "Voir mon match". Current URL:',
+        'found neither "Voir l\'analyse" nor "Voir mon match". Current URL:',
         page.url(),
         'Candidate data-cy values:',
         JSON.stringify(matchCandidates),
@@ -1532,22 +1594,33 @@ async function runCvMatch(
     // (the "Vos talents correspondent mieux à d'autres opportunités" heading, no meter rendered at
     // all) skips this outright; a yellow meter specifically is further gated by ignoreYellowMeter
     // inside prepareJobApplicationDraft(), and saveJob/easyApply gate the two actions independently.
+    let applicationUrl = null;
     if (meter) {
-      await prepareJobApplicationDraft(page, meter.color, { saveJob, easyApply, ignoreYellowMeter });
+      applicationUrl = await prepareJobApplicationDraft(page, meter.color, { saveJob, easyApply, ignoreYellowMeter });
     } else {
       console.error(
-        '[jobup-cv-match] no meter present (e.g. "Vos talents correspondent mieux à d\'autres ' +
+        'no meter present (e.g. "Vos talents correspondent mieux à d\'autres ' +
           'opportunités"); not saving or applying.'
       );
     }
 
-    return { success: true, analysis, meter, criteria, jobUrl, totalJobsCount, errorMessage: null, resultsUrl };
+    return {
+      success: true,
+      analysis,
+      meter,
+      criteria,
+      jobUrl,
+      totalJobsCount,
+      errorMessage: null,
+      resultsUrl,
+      applicationUrl
+    };
   } catch (err) {
     if (err instanceof EmptyResultsError) {
       const message =
         "0 job found, search term : '" + effectiveSearchTerm +
         "', locations : '" + effectiveLocations.join(', ') + "'";
-      console.error('[jobup-cv-match]', message);
+      console.error(message);
       return {
         success: false,
         analysis: null,
@@ -1556,12 +1629,14 @@ async function runCvMatch(
         jobUrl: null,
         totalJobsCount: 0,
         errorMessage: message,
-        resultsUrl: page ? page.url() : null
+        resultsUrl: page ? page.url() : null,
+        applicationUrl: null
       };
     }
     throw err;
   } finally {
     await browser.close();
+    activeBrowser = null;
   }
 }
 
@@ -1593,7 +1668,8 @@ async function runCvMatch(
         jobUrl: null,
         totalJobsCount: null,
         errorMessage: null,
-        resultsUrl: null
+        resultsUrl: null,
+        applicationUrl: null
       })
     );
     return;
@@ -1623,7 +1699,8 @@ async function runCvMatch(
         jobUrl: null,
         totalJobsCount: null,
         errorMessage: null,
-        resultsUrl: null
+        resultsUrl: null,
+        applicationUrl: null
       })
     );
   }

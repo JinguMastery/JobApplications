@@ -23,6 +23,10 @@ export interface AnalysisCriterion {
   status: 'green' | 'yellow' | 'gray';
 }
 
+export interface StopCvMatchResponse {
+  stopped: boolean;
+}
+
 export interface CvMatchResponse {
   success: boolean;
   analysis: string | null;
@@ -32,6 +36,7 @@ export interface CvMatchResponse {
   totalJobsCount: number | null;
   errorMessage: string | null;
   resultsUrl: string | null;
+  applicationUrl: string | null;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -42,8 +47,8 @@ export class Api {
     return this.http.get<HealthResponse>('/api/health');
   }
 
-  login(): Observable<LoginResponse> {
-    return this.http.post<LoginResponse>('/api/login', {});
+  login(credentials: { email: string; password: string }): Observable<LoginResponse> {
+    return this.http.post<LoginResponse>('/api/login', credentials);
   }
 
   cvMatch(options: {
@@ -56,5 +61,9 @@ export class Api {
     ignoreYellowMeter: boolean;
   }): Observable<CvMatchResponse> {
     return this.http.post<CvMatchResponse>('/api/cv-match', options);
+  }
+
+  stopCvMatch(): Observable<StopCvMatchResponse> {
+    return this.http.post<StopCvMatchResponse>('/api/cv-match/stop', {});
   }
 }

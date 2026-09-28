@@ -1,5 +1,6 @@
 import { afterNextRender, Component, HostListener, computed, inject, signal } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
+import { Subscription } from 'rxjs';
 
 import { Api, AnalysisCriterion, AnalysisMeter } from './services/api';
 
@@ -155,6 +156,8 @@ export class App {
   protected readonly backendStatus = signal<'checking' | 'connected' | 'unreachable'>('checking');
   protected readonly loginPending = signal(false);
   protected readonly loginResult = signal<string | null>(null);
+  protected readonly jobupEmail = signal('');
+  protected readonly jobupPassword = signal('');
   protected readonly cvMatchPending = signal(false);
   protected readonly cvMatchResult = signal<string | null>(null);
   protected readonly cvMatchAnalysis = signal<string | null>(null);
@@ -163,6 +166,7 @@ export class App {
   protected readonly cvMatchJobUrl = signal<string | null>(null);
   protected readonly cvMatchTotalJobs = signal<number | null>(null);
   protected readonly cvMatchResultsUrl = signal<string | null>(null);
+  protected readonly cvMatchApplicationUrl = signal<string | null>(null);
   protected readonly jobIndex = signal(1);
   protected readonly searchTerm = signal('');
   protected readonly locationInput = signal('');
@@ -177,8 +181,13 @@ export class App {
     return analysis ? parseAnalysis(analysis, this.cvMatchCriteria(), this.cvMatchMeter()) : [];
   });
 
-  private lastLoginSuccess: boolean | null = null;
-  private lastCvMatchSuccess: boolean | null = null;
+  // Tracked so onStopClick() can unsubscribe from the in-flight cvMatch() request — the backend
+  // POST /api/cv-match call stays open for the whole analysis (it awaits the child process), so
+  // stopping it server-side still leaves this subscription's next/error callback to fire once that
+  // now-killed process's response eventually arrives. Unsubscribing cancels the underlying
+  // HttpClient request (this app uses provideHttpClient(withFetch()), which cancels the fetch on
+  // unsubscribe) so that stale response can never overwrite the state reset below it.
+  private cvMatchSubscription: Subscription | null = null;
 
   constructor() {
     // Deferred to the browser only: at build time `ng build` prerenders this route with no
@@ -191,20 +200,42 @@ export class App {
     });
   }
 
+  protected onJobupEmailInput(event: Event): void {
+    this.jobupEmail.set((event.target as HTMLInputElement).value);
+  }
+
+  protected onJobupPasswordInput(event: Event): void {
+    this.jobupPassword.set((event.target as HTMLInputElement).value);
+  }
+
+  // Bound to the login <form>'s native (submit) event (see app.html) rather than (ngSubmit) — this
+  // app doesn't use Angular's FormsModule anywhere else, so a plain 'submit' listener is used
+  // instead, with preventDefault() here to stop an actual page reload/navigation. The form's
+  // type="email"/required attributes are native HTML5 "built-in validators": the browser blocks the
+  // 'submit' event entirely (and shows its own validation UI) whenever a field is empty or not a
+  // well-formed email, so this never even runs in that case — no custom validation logic needed.
+  protected onLoginSubmit(event: Event): void {
+    event.preventDefault();
+    this.onLoginClick();
+  }
+
   protected onLoginClick(): void {
     this.loginPending.set(true);
     this.loginResult.set(null);
-    this.api.login().subscribe({
+    this.api.login({ email: this.jobupEmail(), password: this.jobupPassword() }).subscribe({
       next: (response) => {
         this.loginResult.set(response.message);
-        this.lastLoginSuccess = response.success;
-        this.updateBackendStatusFromActions();
+        // Receiving any well-formed HTTP response at all — success, a specific known failure
+        // reason, or even the generic "Login failed !" (which can mean the backend hit a
+        // genuinely unexpected internal error, not that it's unreachable) — proves the backend
+        // itself is up and reachable; only a real network-level failure (the error callback
+        // below) means otherwise. See the same reasoning on onCvMatchClick()'s next callback.
+        this.backendStatus.set('connected');
         this.loginPending.set(false);
       },
       error: () => {
         this.loginResult.set('Login failed !');
-        this.lastLoginSuccess = false;
-        this.updateBackendStatusFromActions();
+        this.backendStatus.set('unreachable');
         this.loginPending.set(false);
       }
     });
@@ -273,8 +304,11 @@ export class App {
     this.analysisExpanded.update((expanded) => !expanded);
   }
 
-  protected onCvMatchClick(): void {
-    this.cvMatchPending.set(true);
+  // Shared by onCvMatchClick() (starting a run, pending: true) and onStopClick() (abandoning one,
+  // pending: false) — both put the CV-match section back to the same "nothing to show yet" shape,
+  // just with a different pending state.
+  private resetCvMatchState(pending: boolean): void {
+    this.cvMatchPending.set(pending);
     this.cvMatchResult.set(null);
     this.cvMatchAnalysis.set(null);
     this.cvMatchMeter.set(null);
@@ -282,13 +316,18 @@ export class App {
     this.cvMatchJobUrl.set(null);
     this.cvMatchTotalJobs.set(null);
     this.cvMatchResultsUrl.set(null);
+    this.cvMatchApplicationUrl.set(null);
     this.analysisExpanded.set(true);
+  }
+
+  protected onCvMatchClick(): void {
+    this.resetCvMatchState(true);
     const trimmedSearchTerm = this.searchTerm().trim();
     const locations = this.locationInput()
       .split(',')
       .map((location) => location.trim())
       .filter((location) => location.length > 0);
-    this.api
+    this.cvMatchSubscription = this.api
       .cvMatch({
         jobIndex: this.jobIndex(),
         useBasicSearch: this.useBasicSearch(),
@@ -300,12 +339,14 @@ export class App {
       })
       .subscribe({
         next: (response) => {
+          this.cvMatchSubscription = null;
           // A non-null errorMessage is a specific, expected failure (e.g. jobup.ch reporting 0
           // matching jobs for the given search term/locations) meant to be shown as-is instead of
           // the generic fallback.
-          this.cvMatchResult.set(
-            response.success ? 'Analysis succeeded !' : (response.errorMessage ?? 'Analysis failed !')
-          );
+          const resultMessage = response.success
+            ? 'Analysis succeeded !'
+            : (response.errorMessage ?? 'Analysis failed !');
+          this.cvMatchResult.set(resultMessage);
           this.cvMatchAnalysis.set(response.success ? response.analysis : null);
           this.cvMatchMeter.set(response.success ? response.meter : null);
           this.cvMatchCriteria.set(response.success ? response.criteria : []);
@@ -315,11 +356,18 @@ export class App {
           // range, or the search itself found nothing.
           this.cvMatchTotalJobs.set(response.totalJobsCount);
           this.cvMatchResultsUrl.set(response.resultsUrl);
-          this.lastCvMatchSuccess = response.success;
-          this.updateBackendStatusFromActions();
+          // Only ever non-null when a draft application page was actually opened (easyApply on, a
+          // meter present, "Candidature simplifiée"/"Continuer ma candidature" available), which
+          // only happens alongside a successful analysis — gated on response.success the same way
+          // as cvMatchJobUrl, for the same reason.
+          this.cvMatchApplicationUrl.set(response.success ? response.applicationUrl : null);
+          // Receiving any well-formed HTTP response at all proves the backend itself is up and
+          // reachable — see onLoginClick()'s matching comment for the full reasoning.
+          this.backendStatus.set('connected');
           this.cvMatchPending.set(false);
         },
         error: () => {
+          this.cvMatchSubscription = null;
           this.cvMatchResult.set('Analysis failed !');
           this.cvMatchAnalysis.set(null);
           this.cvMatchMeter.set(null);
@@ -327,21 +375,26 @@ export class App {
           this.cvMatchJobUrl.set(null);
           this.cvMatchTotalJobs.set(null);
           this.cvMatchResultsUrl.set(null);
-          this.lastCvMatchSuccess = false;
-          this.updateBackendStatusFromActions();
+          this.cvMatchApplicationUrl.set(null);
+          this.backendStatus.set('unreachable');
           this.cvMatchPending.set(false);
         }
       });
   }
 
-  // A single failed action doesn't necessarily mean the backend is unreachable (e.g. jobup.ch
-  // itself rejected the login), so only flip to 'unreachable' once both actions have been tried
-  // and both failed; either one succeeding is enough to consider the backend 'connected'.
-  private updateBackendStatusFromActions(): void {
-    if (this.lastLoginSuccess === true || this.lastCvMatchSuccess === true) {
-      this.backendStatus.set('connected');
-    } else if (this.lastLoginSuccess === false && this.lastCvMatchSuccess === false) {
-      this.backendStatus.set('unreachable');
+  // "Stop analysis": cancels this component's own wait for the in-flight POST /api/cv-match (via
+  // unsubscribe — see cvMatchSubscription's comment) so its eventual response can't overwrite the
+  // reset below, tells the backend to actually kill the still-running child process/browser (fire-
+  // and-forget — the UI doesn't wait on this, it's already reset by the time it resolves), and puts
+  // the CV-match section back exactly as it was before the run started.
+  protected onStopClick(): void {
+    if (!this.cvMatchPending()) {
+      return;
     }
+    this.cvMatchSubscription?.unsubscribe();
+    this.cvMatchSubscription = null;
+    this.api.stopCvMatch().subscribe({ next: () => {}, error: () => {} });
+    this.resetCvMatchState(false);
   }
+
 }

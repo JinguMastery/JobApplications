@@ -14,6 +14,9 @@ yarn-error.log
 /playwright/.cache/
 /playwright/.auth/
 
+# Root backend (`npm run build`, see build.js) bundled output
+/dist
+
 # frontend/ (Angular) build output and caches
 /frontend/dist
 /frontend/tmp

@@ -9,9 +9,31 @@
   </p>
 
   <div class="login-section">
-    <button type="button" (click)="onLoginClick()" [disabled]="loginPending()">
-      {{ loginPending() ? 'Logging in...' : 'Login' }}
-    </button>
+    <form class="login-form" (submit)="onLoginSubmit($event)">
+      <label for="jobup-email">Email :</label>
+      <input
+        id="jobup-email"
+        type="email"
+        required
+        class="login-email-input"
+        [value]="jobupEmail()"
+        (input)="onJobupEmailInput($event)"
+        [disabled]="loginPending()"
+      />
+      <label for="jobup-password">Password :</label>
+      <input
+        id="jobup-password"
+        type="password"
+        required
+        class="login-password-input"
+        [value]="jobupPassword()"
+        (input)="onJobupPasswordInput($event)"
+        [disabled]="loginPending()"
+      />
+      <button type="submit" [disabled]="loginPending()">
+        {{ loginPending() ? 'Logging in...' : 'Login' }}
+      </button>
+    </form>
     @if (loginResult()) {
       <span class="login-result">{{ loginResult() }}</span>
     }
@@ -124,6 +146,18 @@
     <button type="button" (click)="onCvMatchClick()" [disabled]="cvMatchPending()">
       {{ cvMatchPending() ? 'Analyzing...' : 'CV Analysis' }}
     </button>
+    <button
+      type="button"
+      class="stop-button"
+      (click)="onStopClick()"
+      [disabled]="!cvMatchPending()"
+      title="Stop analysis"
+      aria-label="Stop analysis"
+    >
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+        <rect x="3" y="3" width="10" height="10" fill="#dc2626" />
+      </svg>
+    </button>
     @if (cvMatchResult()) {
       <span class="cv-match-result">{{ cvMatchResult() }}</span>
     }
@@ -143,6 +177,12 @@
     @if (cvMatchJobUrl()) {
       <p class="cv-match-job-link">
         Link to the job : <a [href]="cvMatchJobUrl()" target="_blank" rel="noopener">{{ cvMatchJobUrl() }}</a>
+      </p>
+    }
+    @if (cvMatchApplicationUrl()) {
+      <p class="cv-match-application-link">
+        If you would like to apply, go to :
+        <a [href]="cvMatchApplicationUrl()" target="_blank" rel="noopener">{{ cvMatchApplicationUrl() }}</a>
       </p>
     }
     @if (cvMatchAnalysis()) {
