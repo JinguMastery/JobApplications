@@ -1,8 +1,8 @@
-import { afterNextRender, Component, HostListener, computed, inject, signal } from '@angular/core';
+import { afterNextRender, Component, HostListener, inject, signal } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
 import { Subscription } from 'rxjs';
 
-import { Api, AnalysisCriterion, AnalysisMeter } from './services/api';
+import { Api, AnalysisCriterion, AnalysisMeter, CvMatchJobResult } from './services/api';
 
 type AnalysisListItem = { text: string; status: 'green' | 'yellow' | 'gray' | null };
 
@@ -160,14 +160,18 @@ export class App {
   protected readonly jobupPassword = signal('');
   protected readonly cvMatchPending = signal(false);
   protected readonly cvMatchResult = signal<string | null>(null);
-  protected readonly cvMatchAnalysis = signal<string | null>(null);
-  protected readonly cvMatchMeter = signal<AnalysisMeter | null>(null);
-  protected readonly cvMatchCriteria = signal<AnalysisCriterion[]>([]);
-  protected readonly cvMatchJobUrl = signal<string | null>(null);
+  // One entry per job index actually analyzed (see routes/api.js's /cv-match doc comment) — replaces
+  // the old single-job cvMatchAnalysis/cvMatchMeter/cvMatchCriteria/cvMatchJobUrl/
+  // cvMatchApplicationUrl signals now that a request can cover a Start..End range analyzed in
+  // parallel and shown all at once, rather than exactly one job.
+  protected readonly cvMatchResults = signal<CvMatchJobResult[]>([]);
   protected readonly cvMatchTotalJobs = signal<number | null>(null);
   protected readonly cvMatchResultsUrl = signal<string | null>(null);
-  protected readonly cvMatchApplicationUrl = signal<string | null>(null);
-  protected readonly jobIndex = signal(1);
+  protected readonly startJobIndex = signal(1);
+  // Independent of startJobIndex — no auto-sync. Left at its own default (1) alongside
+  // startJobIndex's default (1) gives the pre-range single-job behavior out of the box; the user
+  // sets this explicitly to widen the range.
+  protected readonly endJobIndex = signal(1);
   protected readonly searchTerm = signal('');
   protected readonly locationInput = signal('');
   protected readonly useBasicSearch = signal(false);
@@ -175,11 +179,33 @@ export class App {
   protected readonly easyApply = signal(false);
   protected readonly ignoreYellowMeter = signal(false);
   protected readonly jobFiltersExpanded = signal(false);
-  protected readonly analysisExpanded = signal(true);
-  protected readonly cvMatchAnalysisSegments = computed(() => {
-    const analysis = this.cvMatchAnalysis();
-    return analysis ? parseAnalysis(analysis, this.cvMatchCriteria(), this.cvMatchMeter()) : [];
-  });
+  // Every result starts expanded (absence from this set, not presence, means expanded) — tracking
+  // which ones are *collapsed* rather than which are expanded means a freshly-arrived result never
+  // needs to be added to anything to default to expanded.
+  private readonly collapsedJobIndexes = signal<ReadonlySet<number>>(new Set());
+
+  protected isAnalysisExpanded(jobIndex: number): boolean {
+    return !this.collapsedJobIndexes().has(jobIndex);
+  }
+
+  protected onToggleAnalysis(jobIndex: number): void {
+    this.collapsedJobIndexes.update((collapsed) => {
+      const next = new Set(collapsed);
+      if (next.has(jobIndex)) {
+        next.delete(jobIndex);
+      } else {
+        next.add(jobIndex);
+      }
+      return next;
+    });
+  }
+
+  // Called per result from the template (not a single cached computed() — there are now several
+  // independent analyses at once, one per job in cvMatchResults()) — a plain function call is fine
+  // here since results don't change after being set, so there's nothing to memoize against.
+  protected segmentsFor(result: CvMatchJobResult): AnalysisSegment[] {
+    return result.analysis ? parseAnalysis(result.analysis, result.criteria, result.meter) : [];
+  }
 
   // Tracked so onStopClick() can unsubscribe from the in-flight cvMatch() request — the backend
   // POST /api/cv-match call stays open for the whole analysis (it awaits the child process), so
@@ -241,9 +267,14 @@ export class App {
     });
   }
 
-  protected onJobIndexInput(event: Event): void {
+  protected onStartJobIndexInput(event: Event): void {
     const value = Number((event.target as HTMLInputElement).value);
-    this.jobIndex.set(Number.isFinite(value) ? value : 0);
+    this.startJobIndex.set(Number.isFinite(value) ? value : 0);
+  }
+
+  protected onEndJobIndexInput(event: Event): void {
+    const value = Number((event.target as HTMLInputElement).value);
+    this.endJobIndex.set(Number.isFinite(value) ? value : 0);
   }
 
   protected onSearchTermInput(event: Event): void {
@@ -300,24 +331,16 @@ export class App {
     }
   }
 
-  protected onToggleAnalysis(): void {
-    this.analysisExpanded.update((expanded) => !expanded);
-  }
-
   // Shared by onCvMatchClick() (starting a run, pending: true) and onStopClick() (abandoning one,
   // pending: false) — both put the CV-match section back to the same "nothing to show yet" shape,
   // just with a different pending state.
   private resetCvMatchState(pending: boolean): void {
     this.cvMatchPending.set(pending);
     this.cvMatchResult.set(null);
-    this.cvMatchAnalysis.set(null);
-    this.cvMatchMeter.set(null);
-    this.cvMatchCriteria.set([]);
-    this.cvMatchJobUrl.set(null);
+    this.cvMatchResults.set([]);
     this.cvMatchTotalJobs.set(null);
     this.cvMatchResultsUrl.set(null);
-    this.cvMatchApplicationUrl.set(null);
-    this.analysisExpanded.set(true);
+    this.collapsedJobIndexes.set(new Set());
   }
 
   protected onCvMatchClick(): void {
@@ -329,7 +352,8 @@ export class App {
       .filter((location) => location.length > 0);
     this.cvMatchSubscription = this.api
       .cvMatch({
-        jobIndex: this.jobIndex(),
+        startJobIndex: this.startJobIndex(),
+        endJobIndex: this.endJobIndex(),
         useBasicSearch: this.useBasicSearch(),
         searchTerm: trimmedSearchTerm,
         locations,
@@ -340,27 +364,21 @@ export class App {
       .subscribe({
         next: (response) => {
           this.cvMatchSubscription = null;
-          // A non-null errorMessage is a specific, expected failure (e.g. jobup.ch reporting 0
-          // matching jobs for the given search term/locations) meant to be shown as-is instead of
-          // the generic fallback.
+          // A non-null errorMessage is a specific, expected, request-level failure (e.g. jobup.ch
+          // reporting 0 matching jobs for the given search term/locations, or an invalid index
+          // range) meant to be shown as-is instead of the generic fallback. Individual per-job
+          // failures within a successful request are shown inline per result instead (see
+          // app.html) — this top-level message only reflects the request as a whole.
           const resultMessage = response.success
             ? 'Analysis succeeded !'
             : (response.errorMessage ?? 'Analysis failed !');
           this.cvMatchResult.set(resultMessage);
-          this.cvMatchAnalysis.set(response.success ? response.analysis : null);
-          this.cvMatchMeter.set(response.success ? response.meter : null);
-          this.cvMatchCriteria.set(response.success ? response.criteria : []);
-          this.cvMatchJobUrl.set(response.success ? response.jobUrl : null);
+          this.cvMatchResults.set(response.results);
           // Shown regardless of success — knowing the total match count (and the results page it
-          // came from) is still useful context even when the requested job index came back out of
-          // range, or the search itself found nothing.
+          // came from) is still useful context even when the requested index range came back
+          // invalid/out of range, or the search itself found nothing.
           this.cvMatchTotalJobs.set(response.totalJobsCount);
           this.cvMatchResultsUrl.set(response.resultsUrl);
-          // Only ever non-null when a draft application page was actually opened (easyApply on, a
-          // meter present, "Candidature simplifiée"/"Continuer ma candidature" available), which
-          // only happens alongside a successful analysis — gated on response.success the same way
-          // as cvMatchJobUrl, for the same reason.
-          this.cvMatchApplicationUrl.set(response.success ? response.applicationUrl : null);
           // Receiving any well-formed HTTP response at all proves the backend itself is up and
           // reachable — see onLoginClick()'s matching comment for the full reasoning.
           this.backendStatus.set('connected');
@@ -369,13 +387,9 @@ export class App {
         error: () => {
           this.cvMatchSubscription = null;
           this.cvMatchResult.set('Analysis failed !');
-          this.cvMatchAnalysis.set(null);
-          this.cvMatchMeter.set(null);
-          this.cvMatchCriteria.set([]);
-          this.cvMatchJobUrl.set(null);
+          this.cvMatchResults.set([]);
           this.cvMatchTotalJobs.set(null);
           this.cvMatchResultsUrl.set(null);
-          this.cvMatchApplicationUrl.set(null);
           this.backendStatus.set('unreachable');
           this.cvMatchPending.set(false);
         }

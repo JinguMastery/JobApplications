@@ -62,13 +62,19 @@ async function build() {
     entryPoints: [
       path.join(ROOT, 'bin', 'www'),
       path.join(ROOT, 'scripts', 'jobup-login.js'),
+      path.join(ROOT, 'scripts', 'jobup-search.js'),
       path.join(ROOT, 'scripts', 'jobup-cv-match.js')
     ],
     outdir: DIST,
     // Mirrors each entry point's own path relative to ROOT (rather than esbuild's default of the
-    // lowest common ancestor across entry points) — so bin/www lands at dist/bin/www.js and the
-    // two scripts land at dist/scripts/<name>.js, matching the source layout exactly and matching
-    // what routes/api.js's `path.join(APP_ROOT, 'scripts', '<name>.js')` expects to find.
+    // lowest common ancestor across entry points) — so bin/www lands at dist/bin/www.js and each
+    // script lands at dist/scripts/<name>.js, matching the source layout exactly and matching what
+    // routes/api.js's `path.join(APP_ROOT, 'scripts', '<name>.js')` expects to find. scripts/
+    // jobup-shared.js isn't listed as its own entry point — it's required by both jobup-search.js
+    // and jobup-cv-match.js, so esbuild bundles its code straight into each of those two outputs
+    // (the same way jobup-login.js's code already gets inlined into both), rather than needing a
+    // separate dist/scripts/jobup-shared.js file that would just sit unused (nothing spawns it as
+    // its own process).
     outbase: ROOT,
     bundle: true,
     minify: true,

@@ -160,6 +160,31 @@ p {
   word-break: break-all;
 }
 
+/* One per job index in the requested Start..End range (see app.ts's cvMatchResults) — a plain
+   border/padding wrapper is enough to visually separate several of these shown at once, without
+   competing with .analysis-box's own styling inside it. */
+.cv-match-job-result {
+  flex-basis: 100%;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 0.7px solid rgba(29, 28, 26, 0.18);
+}
+
+.cv-match-job-result:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.cv-match-job-heading {
+  font-weight: 700;
+}
+
+.cv-match-job-error {
+  font-weight: 600;
+  color: #b91c1c;
+}
+
 .analysis-box {
   flex-basis: 100%;
   margin-top: 0.5rem;

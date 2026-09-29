@@ -27,16 +27,23 @@ export interface StopCvMatchResponse {
   stopped: boolean;
 }
 
-export interface CvMatchResponse {
+export interface CvMatchJobResult {
+  jobIndex: number;
   success: boolean;
   analysis: string | null;
   meter: AnalysisMeter | null;
   criteria: AnalysisCriterion[];
   jobUrl: string | null;
-  totalJobsCount: number | null;
   errorMessage: string | null;
-  resultsUrl: string | null;
   applicationUrl: string | null;
+}
+
+export interface CvMatchResponse {
+  success: boolean;
+  errorMessage: string | null;
+  totalJobsCount: number | null;
+  resultsUrl: string | null;
+  results: CvMatchJobResult[];
 }
 
 @Injectable({ providedIn: 'root' })
@@ -52,7 +59,8 @@ export class Api {
   }
 
   cvMatch(options: {
-    jobIndex: number;
+    startJobIndex: number;
+    endJobIndex: number;
     useBasicSearch: boolean;
     searchTerm: string;
     locations: string[];
