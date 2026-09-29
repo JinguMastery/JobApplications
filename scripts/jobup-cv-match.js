@@ -197,6 +197,23 @@ async function readAnalysisAndClose(page, waitTimeout) {
   const closeButton = analysisDialog.getByRole('button', { name: /fermer/i });
   await closeButton.waitFor({ state: 'visible', timeout: waitTimeout });
 
+  // Confirmed live (user-reported, jobIndex 6): a weaker match can render a tabbed layout instead
+  // of going straight to this job's own checklist — a "Résultat" tab (`data-cy="tab-results"`,
+  // `role="tab"`) alongside other tabs (e.g. an "Emplois recommandés" alternatives widget). The
+  // read below must reflect this job's own Résultat tab, not whichever tab the modal happens to
+  // land on by default — click it first if present (idempotent if it's already the active tab).
+  // Unverified live in isolation (built directly from the user's own report + DOM snippet, not a
+  // full round trip of this exact fix) — dump the dialog's tab-area markup if this ever mismatches.
+  const resultsTab = analysisDialog.locator('[data-cy="tab-results"]:visible');
+  if ((await resultsTab.count()) > 0) {
+    try {
+      await resultsTab.first().click();
+      await page.waitForTimeout(300);
+    } catch (tabClickErr) {
+      console.error('found a "Résultat" tab but failed to click it: ' + tabClickErr.message);
+    }
+  }
+
   const analysis = (await analysisDialog.innerText()).trim();
   const { meter, criteria } = await extractAnalysisStructure(analysisDialog);
 

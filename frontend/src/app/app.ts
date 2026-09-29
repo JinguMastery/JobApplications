@@ -47,6 +47,19 @@ function isStopMarker(line: string): boolean {
   return STOP_MARKERS.some((marker) => normalized.startsWith(marker));
 }
 
+// A weaker/partial match can render a tabbed layout inside the analysis modal (see the root
+// CLAUDE.md's "Résultat" tab gotcha) — the tab UI's own chrome ("Emplois recommandés (N)", the
+// alternatives-widget section label, and "Résultat", the clicked tab's own label) stays in the
+// modal's plain-text innerText read even after clicking through to this job's own tab, ahead of
+// its real content. Neither is analysis content, so both are dropped rather than rendered as a
+// stray paragraph above the meter/checklist.
+const RECOMMENDED_JOBS_HEADING_PATTERN = /^emplois recommandés\s*\(\d+\)$/i;
+
+function isTabChromeLine(line: string): boolean {
+  const normalized = line.trim().toLowerCase();
+  return normalized === 'résultat' || RECOMMENDED_JOBS_HEADING_PATTERN.test(normalized);
+}
+
 // scripts/jobup-cv-match.js reads each criterion's real status (green/yellow/gray) straight from
 // its icon's color class, separately from the plain-text analysis blob below — so a checklist
 // line here is matched back to its criterion by text containment rather than trusting line order
@@ -106,6 +119,9 @@ function parseAnalysis(
     }
     if (isStopMarker(line)) {
       break;
+    }
+    if (isTabChromeLine(line)) {
+      continue;
     }
 
     const bulletMatch = line.match(BULLET_PATTERN) ?? line.match(NUMBERED_PATTERN);
