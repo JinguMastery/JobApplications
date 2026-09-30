@@ -2,26 +2,29 @@
 
 /**
  * Standalone script (spawned as a child process by routes/api.js) that drives a real browser
- * to log into jobup.ch and reports whether it succeeded.
+ * to log into jobup.ch (or, with the "Use www.jobs.ch" checkbox on, jobs.ch — see loginToJobup()'s
+ * own comment) and reports whether it succeeded.
  *
  * jobup.ch's "Se connecter" control is a JS-driven button (not a link) that opens an
  * Auth0-hosted universal-login flow with no stable URL, and its cookie-consent banner has two
  * different variants (a plain "ok" alert, and a fuller GDPR dialog) depending on the session.
  * See CLAUDE.md for how these selectors were derived.
  *
- * Reads credentials from JOBUP_EMAIL / JOBUP_PASSWORD and prints a single JSON line to stdout:
- * {"success": true|false, "errorMessage": string|null}. Diagnostic output goes to stderr so
- * stdout stays parseable. `errorMessage` is non-null for a specific, expected failure that
- * performLogin() detected immediately rather than surfacing as an opaque 30s timeout (a
+ * Reads credentials from JOBUP_EMAIL / JOBUP_PASSWORD (or JOBSCH_EMAIL / JOBSCH_PASSWORD, per the
+ * "Use www.jobs.ch" checkbox — see the CLI block at the bottom of this file) and prints a single
+ * JSON line to stdout: {"success": true|false, "errorMessage": string|null}. Diagnostic output goes
+ * to stderr so stdout stays parseable. `errorMessage` is non-null for a specific, expected failure
+ * that performLogin() detected immediately rather than surfacing as an opaque 30s timeout (a
  * LoginValidationError subclass — see its own comment): `'Invalid login credentials'` when
  * jobup.ch itself rejected the email/password, or `'Invalid email format'` when Auth0's own
  * client-side validator rejected the typed email before ever submitting it. `null` on every other
  * path, including success and genuinely unexpected errors.
  *
  * On a successful login (CLI invocation only — see the bottom of this file), rewrites the .env
- * file at the repo root with these same credentials via updateEnvFile() below, so routes/api.js's
- * POST /cv-match can pick them up for the very next analysis without a server restart (see its own
- * comment for how). A failed login leaves .env completely untouched.
+ * file at the repo root with these same credentials, under the same site-matching variable names,
+ * via updateEnvFile() below, so routes/api.js's POST /cv-match can pick them up for the very next
+ * analysis without a server restart (see its own comment for how). A failed login leaves .env
+ * completely untouched.
  */
 
 const { chromium } = require('playwright');
@@ -148,11 +151,20 @@ async function performLogin(page, email, password) {
   return outcome === 'success';
 }
 
-async function loginToJobup(email, password) {
+// useJobsCh drives www.jobs.ch instead of www.jobup.ch — see the "Use www.jobs.ch" checkbox next
+// to the Login button (and, separately, the CV Analysis job filters' own copy of the same toggle,
+// which threads through to scripts/jobup-search.js instead). jobs.ch's own Auth0-hosted login page
+// is confirmed to live at auth.jobs.ch/u/login (user-supplied), a different host than jobup.ch's —
+// performLogin()'s own success check was generalized from auth.jobup.ch specifically to any
+// `auth.`-prefixed host for exactly this reason. Everything else here (cookie consent, the
+// "Se connecter" flow itself) is otherwise assumed, not confirmed live, to carry over unchanged —
+// see the root CLAUDE.md's "www.jobs.ch support" section.
+async function loginToJobup(email, password, useJobsCh) {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
-    await page.goto('https://www.jobup.ch/fr/');
+    const baseUrl = useJobsCh ? 'https://www.jobs.ch' : 'https://www.jobup.ch';
+    await page.goto(baseUrl + '/fr/');
 
     await dismissCookieConsent(page);
 
@@ -239,20 +251,29 @@ module.exports = {
 };
 
 // Only run as a standalone CLI when invoked directly (`node scripts/jobup-login.js`), not when
-// required by another script (e.g. scripts/jobup-cv-match.js, which reuses `loginToJobup`).
+// required by another script (scripts/jobup-search.js reuses `dismissCookieConsent`/`performLogin`
+// on its own page/browser instead of `loginToJobup`, which launches its own).
+// process.argv[2] (`'true'`/`'1'`) selects which credential pair to read/write — JOBSCH_EMAIL/
+// JOBSCH_PASSWORD for jobs.ch, JOBUP_EMAIL/JOBUP_PASSWORD (the original, default pair) for jobup.ch
+// — routes/api.js's POST /login passes this through from the frontend's "Use www.jobs.ch" checkbox,
+// alongside overriding the *matching* env var names with whatever was just typed in the form (see
+// its own comment).
 if (require.main === module) {
   (async () => {
-    const email = process.env.JOBUP_EMAIL;
-    const password = process.env.JOBUP_PASSWORD;
+    const useJobsCh = process.argv[2] === 'true' || process.argv[2] === '1';
+    const emailVar = useJobsCh ? 'JOBSCH_EMAIL' : 'JOBUP_EMAIL';
+    const passwordVar = useJobsCh ? 'JOBSCH_PASSWORD' : 'JOBUP_PASSWORD';
+    const email = process.env[emailVar];
+    const password = process.env[passwordVar];
 
     if (!email || !password) {
-      console.error('JOBUP_EMAIL and JOBUP_PASSWORD environment variables are required.');
+      console.error(emailVar + ' and ' + passwordVar + ' environment variables are required.');
       process.stdout.write(JSON.stringify({ success: false, errorMessage: null }));
       return;
     }
 
     try {
-      const success = await loginToJobup(email, password);
+      const success = await loginToJobup(email, password, useJobsCh);
       if (success) {
         try {
           // process.cwd() rather than __dirname — see routes/api.js's matching comment on
@@ -260,7 +281,7 @@ if (require.main === module) {
           // __dirname at runtime is wherever that file physically lands, not necessarily still one
           // level under the repo root the way this source file (in scripts/) is. process.cwd()
           // works the same regardless, for both the unbundled source and the bundled dist/ output.
-          updateEnvFile(path.join(process.cwd(), '.env'), { JOBUP_EMAIL: email, JOBUP_PASSWORD: password });
+          updateEnvFile(path.join(process.cwd(), '.env'), { [emailVar]: email, [passwordVar]: password });
           console.error('login succeeded; updated .env with the new credentials.');
         } catch (envErr) {
           // The login itself still succeeded — don't turn a working login into a reported failure

@@ -546,8 +546,6 @@ module.exports = { runSearch };
 // how routes/api.js spawns it, as a child process, once per POST /api/cv-match request.
 if (require.main === module) {
   (async () => {
-    const email = process.env.JOBUP_EMAIL;
-    const password = process.env.JOBUP_PASSWORD;
     const useBasicSearch = process.argv[2] === 'true' || process.argv[2] === '1';
     const searchTerm = process.argv[3] || '';
     let locations = [];
@@ -558,9 +556,16 @@ if (require.main === module) {
       locations = [];
     }
     const useJobsCh = process.argv[5] === 'true' || process.argv[5] === '1';
+    // Same site-matching credential pair as scripts/jobup-login.js's own CLI block — routes/api.js
+    // reads and overrides the matching pair fresh from .env on every request (see its own
+    // readCurrentJobupCredentials()) so a login done through either checkbox is picked up here.
+    const emailVar = useJobsCh ? 'JOBSCH_EMAIL' : 'JOBUP_EMAIL';
+    const passwordVar = useJobsCh ? 'JOBSCH_PASSWORD' : 'JOBUP_PASSWORD';
+    const email = process.env[emailVar];
+    const password = process.env[passwordVar];
 
     if (!email || !password) {
-      console.error('JOBUP_EMAIL and JOBUP_PASSWORD environment variables are required.');
+      console.error(emailVar + ' and ' + passwordVar + ' environment variables are required.');
       process.stdout.write(
         JSON.stringify({ success: false, errorMessage: null, totalJobsCount: null, resultsUrl: null, storageStatePath: null })
       );

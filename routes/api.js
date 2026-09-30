@@ -19,23 +19,32 @@ var router = express.Router();
 var APP_ROOT = process.cwd();
 var ENV_PATH = path.join(APP_ROOT, '.env');
 
-// Reads the CURRENT JOBUP_EMAIL/JOBUP_PASSWORD straight from the .env file on disk — not from this
-// process's own `process.env`, which dotenv only populated once, at server startup, via app.js's
+// Reads the CURRENT credentials straight from the .env file on disk — not from this process's own
+// `process.env`, which dotenv only populated once, at server startup, via app.js's
 // `require('dotenv').config()`. scripts/jobup-login.js rewrites that file in place on a successful
 // login (see its own comment), and every POST /cv-match spawns a brand-new jobup-search.js child
 // process, so re-reading the file fresh on every request here is what lets a freshly-entered login
 // take effect immediately, with no backend restart needed. Falls back to this process's own
 // process.env (what dotenv loaded at startup) if the file is missing or unreadable.
-function readCurrentJobupCredentials() {
+//
+// `useJobsCh` picks which pair is read — JOBSCH_EMAIL/JOBSCH_PASSWORD or JOBUP_EMAIL/JOBUP_PASSWORD
+// (the original, default pair) — matching whichever site this request's own "Use www.jobs.ch"
+// checkbox selected, and returns it under that same key name so the spawned child's env override
+// (see runSearchScript() below) hands scripts/jobup-search.js exactly the variable name its own
+// CLI block reads for that site.
+function readCurrentJobupCredentials(useJobsCh) {
+  var emailVar = useJobsCh ? 'JOBSCH_EMAIL' : 'JOBUP_EMAIL';
+  var passwordVar = useJobsCh ? 'JOBSCH_PASSWORD' : 'JOBUP_PASSWORD';
+  var result = {};
   try {
     var parsed = dotenv.parse(fs.readFileSync(ENV_PATH, 'utf8'));
-    return {
-      JOBUP_EMAIL: parsed.JOBUP_EMAIL || process.env.JOBUP_EMAIL,
-      JOBUP_PASSWORD: parsed.JOBUP_PASSWORD || process.env.JOBUP_PASSWORD
-    };
+    result[emailVar] = parsed[emailVar] || process.env[emailVar];
+    result[passwordVar] = parsed[passwordVar] || process.env[passwordVar];
   } catch (err) {
-    return { JOBUP_EMAIL: process.env.JOBUP_EMAIL, JOBUP_PASSWORD: process.env.JOBUP_PASSWORD };
+    result[emailVar] = process.env[emailVar];
+    result[passwordVar] = process.env[passwordVar];
   }
+  return result;
 }
 
 // Tracks every child process (the one-time jobup-search.js run, plus each parallel
@@ -112,7 +121,7 @@ async function runSearchScript(current, useBasicSearch, searchTerm, locations, u
     [scriptPath, String(useBasicSearch), searchTerm, JSON.stringify(locations), String(useJobsCh)],
     {
       timeout: 90000,
-      env: Object.assign({}, process.env, readCurrentJobupCredentials())
+      env: Object.assign({}, process.env, readCurrentJobupCredentials(useJobsCh))
     }
   );
   if (spawned.stderr) {
@@ -245,17 +254,19 @@ router.get('/health', function(req, res) {
 });
 
 /*
- * POST triggers the jobup.ch login automation as a background process (see
- * scripts/jobup-login.js), waits for it to finish, and reports the outcome as a display string.
- * Takes `email`/`password` in the body, from the frontend's Email/Password inputs next to the
- * Login button (native `type="email"`/`required` HTML validators on those fields keep an empty or
- * malformed value from ever reaching this endpoint in the first place) — passed to the script via
- * its spawned environment, overriding whatever this server process's own JOBUP_EMAIL/JOBUP_PASSWORD
- * currently are, so each attempt uses exactly what the user just typed rather than a stale value.
- * On success, scripts/jobup-login.js itself rewrites the .env file with these same credentials (see
- * its own comment for how) so subsequent POST /cv-match runs pick them up too, via
- * readCurrentJobupCredentials() above — no server restart needed; on failure, .env is left
- * completely untouched.
+ * POST triggers the jobup.ch (or, with `useJobsCh`, jobs.ch) login automation as a background
+ * process (see scripts/jobup-login.js), waits for it to finish, and reports the outcome as a
+ * display string. Takes `email`/`password` in the body, from the frontend's Email/Password inputs
+ * next to the Login button (native `type="email"`/`required` HTML validators on those fields keep
+ * an empty or malformed value from ever reaching this endpoint in the first place), plus
+ * `useJobsCh` from the "Use www.jobs.ch" checkbox next to that same button — passed to the script
+ * via its spawned environment, overriding whatever this server process's own JOBUP_EMAIL/
+ * JOBUP_PASSWORD (or JOBSCH_EMAIL/JOBSCH_PASSWORD, matching `useJobsCh`) currently are, so each
+ * attempt uses exactly what the user just typed rather than a stale value.
+ * On success, scripts/jobup-login.js itself rewrites the .env file with these same credentials,
+ * under that same site-matching variable name (see its own comment for how) so subsequent
+ * POST /cv-match runs pick them up too, via readCurrentJobupCredentials() above — no server restart
+ * needed; on failure, .env is left completely untouched.
  * `message` is `'Login succeeded !'` on success, else the script's own `errorMessage` when it's a
  * specific, known failure (a `LoginValidationError` subclass in scripts/jobup-login.js —
  * currently `'Invalid login credentials'`, when jobup.ch itself rejected the email/password, or
@@ -267,17 +278,24 @@ router.post('/login', function(req, res) {
   var scriptPath = path.join(APP_ROOT, 'scripts', 'jobup-login.js');
   var email = (req.body && typeof req.body.email === 'string') ? req.body.email.trim() : '';
   var password = (req.body && typeof req.body.password === 'string') ? req.body.password : '';
+  var useJobsCh = !!(req.body && req.body.useJobsCh);
 
   if (!email || !password) {
     return res.json({ success: false, message: 'Login failed !' });
   }
 
+  var emailVar = useJobsCh ? 'JOBSCH_EMAIL' : 'JOBUP_EMAIL';
+  var passwordVar = useJobsCh ? 'JOBSCH_PASSWORD' : 'JOBUP_PASSWORD';
+  var envOverride = {};
+  envOverride[emailVar] = email;
+  envOverride[passwordVar] = password;
+
   execFile(
     'node',
-    [scriptPath],
+    [scriptPath, String(useJobsCh)],
     {
       timeout: 60000,
-      env: Object.assign({}, process.env, { JOBUP_EMAIL: email, JOBUP_PASSWORD: password })
+      env: Object.assign({}, process.env, envOverride)
     },
     function(err, stdout, stderr) {
       if (stderr) {

@@ -59,6 +59,13 @@ p {
   width: 220px;
 }
 
+.login-use-jobs-ch {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
 .login-result {
   font-weight: 600;
 }

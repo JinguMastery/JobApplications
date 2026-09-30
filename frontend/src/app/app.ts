@@ -181,6 +181,11 @@ export class App {
   protected readonly loginResult = signal<string | null>(null);
   protected readonly jobupEmail = signal('');
   protected readonly jobupPassword = signal('');
+  // Separate from the CV Analysis job filters' own `useJobsCh` signal below — this one only
+  // affects the Login button's own attempt; the two toggles are independent since a login can be
+  // tested against either site without affecting which site the next CV Analysis run searches,
+  // and vice versa.
+  protected readonly loginUseJobsCh = signal(false);
   protected readonly cvMatchPending = signal(false);
   protected readonly cvMatchResult = signal<string | null>(null);
   // One entry per job index actually analyzed (see routes/api.js's /cv-match doc comment) — replaces
@@ -258,6 +263,10 @@ export class App {
     this.jobupPassword.set((event.target as HTMLInputElement).value);
   }
 
+  protected onLoginUseJobsChChange(event: Event): void {
+    this.loginUseJobsCh.set((event.target as HTMLInputElement).checked);
+  }
+
   // Bound to the login <form>'s native (submit) event (see app.html) rather than (ngSubmit) — this
   // app doesn't use Angular's FormsModule anywhere else, so a plain 'submit' listener is used
   // instead, with preventDefault() here to stop an actual page reload/navigation. The form's
@@ -272,23 +281,25 @@ export class App {
   protected onLoginClick(): void {
     this.loginPending.set(true);
     this.loginResult.set(null);
-    this.api.login({ email: this.jobupEmail(), password: this.jobupPassword() }).subscribe({
-      next: (response) => {
-        this.loginResult.set(response.message);
-        // Receiving any well-formed HTTP response at all — success, a specific known failure
-        // reason, or even the generic "Login failed !" (which can mean the backend hit a
-        // genuinely unexpected internal error, not that it's unreachable) — proves the backend
-        // itself is up and reachable; only a real network-level failure (the error callback
-        // below) means otherwise. See the same reasoning on onCvMatchClick()'s next callback.
-        this.backendStatus.set('connected');
-        this.loginPending.set(false);
-      },
-      error: () => {
-        this.loginResult.set('Login failed !');
-        this.backendStatus.set('unreachable');
-        this.loginPending.set(false);
-      }
-    });
+    this.api
+      .login({ email: this.jobupEmail(), password: this.jobupPassword(), useJobsCh: this.loginUseJobsCh() })
+      .subscribe({
+        next: (response) => {
+          this.loginResult.set(response.message);
+          // Receiving any well-formed HTTP response at all — success, a specific known failure
+          // reason, or even the generic "Login failed !" (which can mean the backend hit a
+          // genuinely unexpected internal error, not that it's unreachable) — proves the backend
+          // itself is up and reachable; only a real network-level failure (the error callback
+          // below) means otherwise. See the same reasoning on onCvMatchClick()'s next callback.
+          this.backendStatus.set('connected');
+          this.loginPending.set(false);
+        },
+        error: () => {
+          this.loginResult.set('Login failed !');
+          this.backendStatus.set('unreachable');
+          this.loginPending.set(false);
+        }
+      });
   }
 
   protected onStartJobIndexInput(event: Event): void {

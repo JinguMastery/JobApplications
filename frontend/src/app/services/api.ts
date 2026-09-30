@@ -54,7 +54,7 @@ export class Api {
     return this.http.get<HealthResponse>('/api/health');
   }
 
-  login(credentials: { email: string; password: string }): Observable<LoginResponse> {
+  login(credentials: { email: string; password: string; useJobsCh: boolean }): Observable<LoginResponse> {
     return this.http.post<LoginResponse>('/api/login', credentials);
   }
 
