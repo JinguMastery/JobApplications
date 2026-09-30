@@ -1010,8 +1010,39 @@ async function runCvMatchJob(resultsUrl, storageStatePath, jobIndex, saveJob, ea
       await newAnalysisButton.first().click();
       await page.getByRole('button', { name: 'Continuer', exact: true }).click();
       // The AI analysis can take a while to run; wait generously for "Fermer" to appear, since
-      // that signals the result is ready to read (handled inside readAnalysisAndClose).
-      ({ analysis, meter, criteria } = await readAnalysisAndClose(page, 60000));
+      // that signals the result is ready to read (handled inside readAnalysisAndClose()).
+      // Confirmed live: a batch of 5 workers hitting jobs.ch's AI analysis concurrently can push
+      // some jobs' generation past 60s even though the exact same code/selector succeeds for
+      // others in the same run (jobIndex 1 succeeded; 2, 5, 8, 9, 10 all timed out here in one
+      // 1..50 run) — not a broken selector, contention under concurrent load. Bumped 60s -> 90s as
+      // a mitigation, and this specific timeout is now caught and reported with its own
+      // errorMessage (previously fell through to the generic top-level catch, which dumped the
+      // raw Playwright TimeoutError to stderr and returned errorMessage: null, i.e. just "Analysis
+      // failed !" in the UI with no way to tell this apart from a genuine break without reading
+      // backend logs). Unconfirmed whether 90s is actually enough under worse contention, or
+      // whether this happens against jobup.ch too (no evidence of it there so far) — if it recurs,
+      // that's the next thing to look at (e.g. a lower batch size specifically for this step, or a
+      // retry).
+      try {
+        ({ analysis, meter, criteria } = await readAnalysisAndClose(page, 90000));
+      } catch (analysisWaitErr) {
+        if (analysisWaitErr.name === 'TimeoutError') {
+          console.error(
+            'timed out waiting for the AI analysis to finish generating for jobIndex ' + jobIndex + '.'
+          );
+          return {
+            jobIndex,
+            success: false,
+            analysis: null,
+            meter: null,
+            criteria: [],
+            jobUrl,
+            errorMessage: 'AI analysis took too long to generate for this job',
+            applicationUrl: null
+          };
+        }
+        throw analysisWaitErr;
+      }
     } else {
       const matchCandidates = await page.locator('[data-cy]').evaluateAll((els) => {
         const seen = new Set();

@@ -30,9 +30,6 @@
         (input)="onJobupPasswordInput($event)"
         [disabled]="loginPending()"
       />
-      <button type="submit" [disabled]="loginPending()">
-        {{ loginPending() ? 'Logging in...' : 'Login' }}
-      </button>
       <label for="login-use-jobs-ch" class="login-use-jobs-ch">
         <input
           id="login-use-jobs-ch"
@@ -43,6 +40,9 @@
         />
         Use www.jobs.ch
       </label>
+      <button type="submit" [disabled]="loginPending()">
+        {{ loginPending() ? 'Logging in...' : 'Login' }}
+      </button>
     </form>
     @if (loginResult()) {
       <span class="login-result">{{ loginResult() }}</span>
