@@ -158,7 +158,7 @@ CLAUDE.md               Detailed implementation notes and selector pitfalls (job
 ## Limitations
 
 - Local development only, beyond the backend's own bundling story (see "Backend build/deployment" above) — there's no combined frontend+backend production deployment yet.
-- jobs.ch support is only lightly verified against the live site — login, search, and a single job's analysis have been confirmed working, but most of the flow (documented gotchas throughout CLAUDE.md) was only ever verified against jobup.ch. Expect rough edges and check the backend logs if something looks wrong.
+- jobs.ch support is confirmed for the core flow — login, search, parallel job selection, and analysis (including a weak-match/no-meter result) have all worked correctly in real runs — but some parts (location filtering beyond a single value, pagination past page 1, the application-drafting flow) haven't specifically been exercised there yet, only on jobup.ch. Expect rough edges there and check the backend logs if something looks wrong.
 - On the "Search with my profile" path, location filtering isn't applied. Check **Use basic search** when you need results filtered by location.
 - The application-drafting flow hasn't been fully verified against the live site. Check drafts before submitting them.
 - A job's AI analysis can occasionally take longer than expected to generate when several are running in parallel; a timed-out job reports its own error rather than failing the whole run, and can simply be re-run.
