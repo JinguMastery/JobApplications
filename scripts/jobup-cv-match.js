@@ -197,23 +197,21 @@ async function readAnalysisAndClose(page, waitTimeout) {
   const closeButton = analysisDialog.getByRole('button', { name: /fermer/i });
   await closeButton.waitFor({ state: 'visible', timeout: waitTimeout });
 
-  // Confirmed live (user-reported, jobIndex 6): a weaker match can render a tabbed layout instead
-  // of going straight to this job's own checklist — a "Résultat" tab (`data-cy="tab-results"`,
-  // `role="tab"`) alongside other tabs (e.g. an "Emplois recommandés" alternatives widget). The
-  // read below must reflect this job's own Résultat tab, not whichever tab the modal happens to
-  // land on by default — click it first if present (idempotent if it's already the active tab).
-  // Unverified live in isolation (built directly from the user's own report + DOM snippet, not a
-  // full round trip of this exact fix) — dump the dialog's tab-area markup if this ever mismatches.
-  const resultsTab = analysisDialog.locator('[data-cy="tab-results"]:visible');
-  if ((await resultsTab.count()) > 0) {
-    try {
-      await resultsTab.first().click();
-      await page.waitForTimeout(300);
-    } catch (tabClickErr) {
-      console.error('found a "Résultat" tab but failed to click it: ' + tabClickErr.message);
-    }
-  }
-
+  // A speculative fix once lived here: clicking a "Résultat" tab (`data-cy="tab-results"`) before
+  // reading, on the unverified assumption (from a jobIndex 6 report) that it reveals *this job's
+  // own* checklist when a weaker match renders an "Emplois recommandés" alternatives widget.
+  // **Confirmed live to be wrong, then reverted**: for jobIndex 82, this produced a full, coherent
+  // "Un bon départ" analysis (real meter, real checklist) — but the job's actual verdict on the
+  // live site is "Vos talents correspondent mieux à d'autres opportunités" (no meter at all). The
+  // "Résultat" tab almost certainly opens a *recommended alternative job's own full result*, not
+  // this job's — clicking it silently substituted a different job's entire analysis, a far worse
+  // failure mode than the cosmetic boilerplate lines it was meant to fix (the frontend's
+  // `isTabChromeLine()` in `app.ts` already strips the "Résultat"/"Emplois recommandés (N)" text
+  // lines from display on its own, with no click needed — see CLAUDE.md). Also, jobIndex 2 in an
+  // earlier run correctly captured this exact verdict (meter: null, right heading) with no click
+  // at all, before this fix ever existed — the plain, unclicked read was already correct for a
+  // genuine weak match. Don't reintroduce this without a live round trip that confirms what
+  // "Résultat" actually contains.
   const analysis = (await analysisDialog.innerText()).trim();
   const { meter, criteria } = await extractAnalysisStructure(analysisDialog);
 
