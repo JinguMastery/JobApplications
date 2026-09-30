@@ -17,17 +17,24 @@ const NUMBERED_PATTERN = /^\d+[.)]\s+(.*)$/;
 const COLON_HEADING_PATTERN = /^.{1,70}:$/;
 const SHORT_QUESTION_PATTERN = /^.{1,45}\?$/;
 
-// jobup.ch's own CV-match modal always groups criteria under these two fixed section labels
-// (see the "Un bon départ" screenshots), regardless of what the AI-generated verdict/criteria
-// text says — so they're recognized by name rather than guessed at structurally.
-const KNOWN_SECTION_HEADINGS = new Set([
-  'connaissances, qualifications et compétences importantes',
+// jobup.ch's own CV-match modal always groups criteria under fixed section labels (see the "Un
+// bon départ" screenshots), regardless of what the AI-generated verdict/criteria text says — so
+// they're recognized by name rather than guessed at structurally. Confirmed live: the wording
+// isn't fixed after all — a "C'est très bien" (strong-match) verdict uses the bare "Connaissances,
+// qualifications et compétences" heading, without the "importantes" suffix every prior sample had
+// (jobIndex 35/44). Matched by prefix rather than an exact string for this reason; an exact match
+// missing this heading silently broke BOTH the meter (only inserted once a section heading is
+// detected) and the criteria list (every line falls through to a plain paragraph instead of a list
+// item while `inSection` is false) — not two separate bugs, one shared root cause.
+const KNOWN_SECTION_HEADING_PREFIXES = [
+  'connaissances, qualifications et compétences',
   'autres demandes'
-]);
+];
 
 function isSectionHeading(line: string): boolean {
+  const normalized = line.toLowerCase();
   return (
-    KNOWN_SECTION_HEADINGS.has(line.toLowerCase()) ||
+    KNOWN_SECTION_HEADING_PREFIXES.some((prefix) => normalized.startsWith(prefix)) ||
     COLON_HEADING_PATTERN.test(line) ||
     SHORT_QUESTION_PATTERN.test(line)
   );
