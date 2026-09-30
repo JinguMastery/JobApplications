@@ -21,7 +21,11 @@
  * avec mon profil" ends up being used, since that CTA generates its own profile-derived term
  * server-side); `process.argv[4]` is a JSON-encoded array of custom locations (falls back to
  * `[LOCATION_SLUG]` when empty/absent), each appended as its own `location=` query param wherever
- * this file applies a location filter.
+ * this file applies a location filter. `process.argv[5]` (`'true'`/`'1'`) picks www.jobs.ch instead
+ * of www.jobup.ch as the site driven for the rest of this run — see BASE_URL/JOBS_PATH below; every
+ * other selector/flow in this file and jobup-cv-match.js is assumed to carry over unchanged between
+ * the two (unverified live — jobs.ch and jobup.ch are sister sites under the same company, but no
+ * jobs.ch session was available in this environment to confirm its markup actually matches).
  *
  * On success, saves the authenticated browser context's `storageState` (cookies + localStorage)
  * to a temp JSON file so each per-job worker can load it into its own fresh browser and start
@@ -91,12 +95,19 @@ function appendLocations(url, locations) {
   }
 }
 
-async function runSearch(email, password, useBasicSearch, searchTerm, locations) {
+async function runSearch(email, password, useBasicSearch, searchTerm, locations, useJobsCh) {
   const effectiveSearchTerm = searchTerm && searchTerm.trim() ? searchTerm.trim() : RECOVERY_SEARCH_TERM;
   const filteredLocations = (Array.isArray(locations) ? locations : [])
     .map((location) => String(location).trim())
     .filter((location) => location.length > 0);
   const effectiveLocations = filteredLocations.length > 0 ? filteredLocations : [LOCATION_SLUG];
+
+  // jobs.ch's own jobs-listing path is "/fr/offres-emplois/", not jobup.ch's "/fr/emplois/" — every
+  // other URL this file touches (pagination's `?page=N`, the location=/term= fallback query params,
+  // etc.) is built by mutating *this* page's own already-loaded URL rather than a second hardcoded
+  // literal, so switching these two is the only domain-specific thing needed here.
+  const BASE_URL = useJobsCh ? 'https://www.jobs.ch' : 'https://www.jobup.ch';
+  const JOBS_PATH = useJobsCh ? '/fr/offres-emplois/' : '/fr/emplois/';
 
   const browser = await chromium.launch();
   activeBrowser = browser;
@@ -109,7 +120,7 @@ async function runSearch(email, password, useBasicSearch, searchTerm, locations)
     // full-size browser window showed. A larger, fixed viewport keeps the desktop layout consistent
     // regardless of Playwright's own headless default, so this class of mismatch doesn't recur.
     page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-    await page.goto('https://www.jobup.ch/fr/');
+    await page.goto(BASE_URL + '/fr/');
 
     await dismissCookieConsent(page);
 
@@ -126,7 +137,7 @@ async function runSearch(email, password, useBasicSearch, searchTerm, locations)
       return { success: false, errorMessage: null, totalJobsCount: null, resultsUrl: null, storageStatePath: null };
     }
 
-    await page.goto('https://www.jobup.ch/fr/emplois/');
+    await page.goto(BASE_URL + JOBS_PATH);
 
     // The accessible name "Rechercher avec mon profil" also matches a second, nested button
     // inside the "Ouvrir Recherche" search-bar dropdown (data-cy="search-with-profile-button-row"),
@@ -546,6 +557,7 @@ if (require.main === module) {
     } catch {
       locations = [];
     }
+    const useJobsCh = process.argv[5] === 'true' || process.argv[5] === '1';
 
     if (!email || !password) {
       console.error('JOBUP_EMAIL and JOBUP_PASSWORD environment variables are required.');
@@ -556,7 +568,7 @@ if (require.main === module) {
     }
 
     try {
-      const result = await runSearch(email, password, useBasicSearch, searchTerm, locations);
+      const result = await runSearch(email, password, useBasicSearch, searchTerm, locations, useJobsCh);
       process.stdout.write(JSON.stringify(result));
     } catch (err) {
       // Deliberately not a raw `console.error(err)` — see scripts/jobup-login.js's matching

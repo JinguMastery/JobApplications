@@ -104,12 +104,12 @@ function spawnScript(current, command, args, options) {
 // job index in the requested range (see the root CLAUDE.md's "jobup.ch CV-match automation"
 // section for the full split). Parses its stdout JSON the same defensive way every other script
 // invocation in this file does: default to a "nothing happened" shape if parsing fails.
-async function runSearchScript(current, useBasicSearch, searchTerm, locations) {
+async function runSearchScript(current, useBasicSearch, searchTerm, locations, useJobsCh) {
   var scriptPath = path.join(APP_ROOT, 'scripts', 'jobup-search.js');
   var spawned = await spawnScript(
     current,
     'node',
-    [scriptPath, String(useBasicSearch), searchTerm, JSON.stringify(locations)],
+    [scriptPath, String(useBasicSearch), searchTerm, JSON.stringify(locations), String(useJobsCh)],
     {
       timeout: 90000,
       env: Object.assign({}, process.env, readCurrentJobupCredentials())
@@ -310,7 +310,9 @@ router.post('/login', function(req, res) {
  *
  * Also takes `useBasicSearch`, `searchTerm`, `locations`, `saveJob`, `easyApply`,
  * `ignoreYellowMeter` exactly as the single-job endpoint used to (see git history / CLAUDE.md for
- * their individual meanings — unchanged by this split).
+ * their individual meanings — unchanged by this split), plus `useJobsCh`: drives www.jobs.ch
+ * instead of www.jobup.ch for this request's search + every one of its workers (see the frontend's
+ * "Use www.jobs.ch" checkbox and CLAUDE.md's "jobup.ch CV-match automation" section).
  *
  * Responds with `{ success, errorMessage, totalJobsCount, resultsUrl, results }`:
  * - `totalJobsCount`/`resultsUrl` come from the one-time search and are included whenever the
@@ -343,6 +345,7 @@ router.post('/cv-match', async function(req, res) {
   var saveJob = !!(req.body && req.body.saveJob);
   var easyApply = !!(req.body && req.body.easyApply);
   var ignoreYellowMeter = !!(req.body && req.body.ignoreYellowMeter);
+  var useJobsCh = !!(req.body && req.body.useJobsCh);
   var startJobIndex = Number(req.body && req.body.startJobIndex);
   var endJobIndex = Number(req.body && req.body.endJobIndex);
 
@@ -350,7 +353,7 @@ router.post('/cv-match', async function(req, res) {
   runningCvMatch = current;
 
   try {
-    var searchResult = await runSearchScript(current, useBasicSearch, searchTerm, locations);
+    var searchResult = await runSearchScript(current, useBasicSearch, searchTerm, locations, useJobsCh);
 
     if (!searchResult.success) {
       return sendJsonIfStillConnected(res, {

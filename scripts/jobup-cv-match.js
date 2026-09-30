@@ -980,7 +980,10 @@ async function runCvMatchJob(resultsUrl, storageStatePath, jobIndex, saveJob, ea
     if (!jobHref) {
       jobHref = await selectedJob.locator('a[href]').first().getAttribute('href').catch(() => null);
     }
-    const jobUrl = jobHref ? new URL(jobHref, 'https://www.jobup.ch').toString() : null;
+    // Resolved against resultsUrl's own origin rather than a hardcoded jobup.ch one — this worker
+    // is domain-agnostic by construction (see the "Use www.jobs.ch" checkbox/routes/api.js's own
+    // comment): whichever site produced resultsUrl is also where a relative jobHref belongs.
+    const jobUrl = jobHref ? new URL(jobHref, new URL(resultsUrl).origin).toString() : null;
 
     await selectedJob.click();
 

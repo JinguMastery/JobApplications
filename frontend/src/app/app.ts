@@ -197,6 +197,7 @@ export class App {
   protected readonly endJobIndex = signal(1);
   protected readonly searchTerm = signal('');
   protected readonly locationInput = signal('');
+  protected readonly useJobsCh = signal(false);
   protected readonly useBasicSearch = signal(false);
   protected readonly saveJob = signal(false);
   protected readonly easyApply = signal(false);
@@ -308,6 +309,10 @@ export class App {
     this.locationInput.set((event.target as HTMLInputElement).value);
   }
 
+  protected onUseJobsChChange(event: Event): void {
+    this.useJobsCh.set((event.target as HTMLInputElement).checked);
+  }
+
   protected onUseBasicSearchChange(event: Event): void {
     this.useBasicSearch.set((event.target as HTMLInputElement).checked);
   }
@@ -382,7 +387,8 @@ export class App {
         locations,
         saveJob: this.saveJob(),
         easyApply: this.easyApply(),
-        ignoreYellowMeter: this.ignoreYellowMeter()
+        ignoreYellowMeter: this.ignoreYellowMeter(),
+        useJobsCh: this.useJobsCh()
       })
       .subscribe({
         next: (response) => {

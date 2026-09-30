@@ -67,6 +67,7 @@ export class Api {
     saveJob: boolean;
     easyApply: boolean;
     ignoreYellowMeter: boolean;
+    useJobsCh: boolean;
   }): Observable<CvMatchResponse> {
     return this.http.post<CvMatchResponse>('/api/cv-match', options);
   }

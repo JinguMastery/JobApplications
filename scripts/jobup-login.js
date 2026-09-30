@@ -132,8 +132,13 @@ async function performLogin(page, email, password) {
   await passwordField.fill(password);
   await page.getByRole('button', { name: 'Continuer', exact: true }).click();
 
+  // Generalized to any `auth.*` host rather than hardcoding `auth.jobup.ch` specifically — this
+  // same flow also drives jobs.ch (see the "Use www.jobs.ch" checkbox/routes/api.js's own comment)
+  // via an Auth0-hosted universal-login flow at its own `auth.` subdomain, unverified live whether
+  // that's the same `auth.jobup.ch` tenant or a separate `auth.jobs.ch` one — either way, success is
+  // "navigated away from the auth subdomain back to the main site".
   const outcome = await Promise.race([
-    page.waitForURL((url) => !url.hostname.includes('auth.jobup.ch'), { timeout: 20000 }).then(() => 'success'),
+    page.waitForURL((url) => !url.hostname.startsWith('auth.'), { timeout: 20000 }).then(() => 'success'),
     errorMessage.waitFor({ state: 'visible', timeout: 20000 }).then(() => 'invalidCredentials'),
   ]).catch(() => 'timeout');
 

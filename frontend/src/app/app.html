@@ -108,6 +108,16 @@
       </button>
       @if (jobFiltersExpanded()) {
         <div class="job-filters-panel">
+          <label for="use-jobs-ch" class="job-filters-option">
+            <input
+              id="use-jobs-ch"
+              type="checkbox"
+              [checked]="useJobsCh()"
+              (change)="onUseJobsChChange($event)"
+              [disabled]="cvMatchPending()"
+            />
+            Use www.jobs.ch
+          </label>
           <label for="use-basic-search" class="job-filters-option">
             <input
               id="use-basic-search"
