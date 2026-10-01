@@ -318,16 +318,75 @@ async function generateCoverLetterIfNeeded(applicationPage) {
     return;
   }
 
+  // The 2-hop walk above can stop at the required marker before reaching the field itself, so look
+  // a little further for the field alone — needed to tell when generation has finished. Widening
+  // this is safe in a way widening the marker search wasn't: it only reads the field, it never
+  // decides whether to generate.
+  if (!fieldLocator) {
+    for (let hops = 2; hops < 5 && !fieldLocator; hops++) {
+      container = container.locator('xpath=..');
+      const field = container.locator('textarea, [contenteditable="true"]').and(visible).first();
+      if (await field.isVisible().catch(() => false)) {
+        fieldLocator = field;
+      }
+    }
+  }
+
   const generateButton = applicationPage.getByRole('button', { name: /générer/i }).and(visible);
   if (await generateButton.first().isVisible({ timeout: 5000 }).catch(() => false)) {
     await generateButton.first().click();
     console.error('clicked "Générer" for the cover letter.');
-    // Generation likely takes a moment; give it a window but don't fail the whole draft if it
-    // doesn't finish — the rest of the draft (documents, questions) can still be prepared.
-    await applicationPage.waitForTimeout(5000);
-  } else {
-    console.error('cover-letter field is required but no "Générer" button was found.');
+    // Not awaited here: generation runs while the documents/questions are handled, and
+    // fillApplicationDraft() waits for it via waitForCoverLetterText() right before saving.
+    return { fieldLocator };
   }
+  console.error('cover-letter field is required but no "Générer" button was found.');
+  return null;
+}
+
+function readCoverLetterText(fieldLocator) {
+  return fieldLocator
+    .evaluate((el) => (el.tagName === 'TEXTAREA' ? el.value : el.textContent) || '')
+    .catch(() => '');
+}
+
+// Confirmed live on jobs.ch: a draft saved a few seconds after clicking "Générer" (the old flat 5s
+// wait, plus however long the documents took) came back with an empty cover letter — generation
+// hadn't finished, so the save didn't include it. Polls the field until it holds text that has
+// stopped changing for STABLE_MS (generation may stream text in progressively), up to TIMEOUT_MS.
+// Returns whether a stable, non-empty letter was seen; never throws.
+async function waitForCoverLetterText(applicationPage, fieldLocator) {
+  const TIMEOUT_MS = 90000;
+  const STABLE_MS = 3000;
+  const POLL_MS = 500;
+  if (!fieldLocator) {
+    console.error(
+      'cover-letter field element not found, so generation completion cannot be checked; ' +
+        `waiting a flat ${STABLE_MS * 5}ms instead.`
+    );
+    await applicationPage.waitForTimeout(STABLE_MS * 5);
+    return false;
+  }
+  const start = Date.now();
+  let lastText = '';
+  let lastChange = Date.now();
+  while (Date.now() - start < TIMEOUT_MS) {
+    const text = (await readCoverLetterText(fieldLocator)).trim();
+    if (text !== lastText) {
+      lastText = text;
+      lastChange = Date.now();
+    } else if (text && Date.now() - lastChange >= STABLE_MS) {
+      console.error(
+        `cover letter generated (${text.length} chars, ${Math.round((Date.now() - start) / 1000)}s after the check started).`
+      );
+      return true;
+    }
+    await applicationPage.waitForTimeout(POLL_MS);
+  }
+  console.error(
+    `cover letter still ${lastText ? 'changing' : 'empty'} after ${TIMEOUT_MS / 1000}s; saving the draft anyway.`
+  );
+  return false;
 }
 
 // Empties a cover-letter field found to hold leftover content when the field turned out to be
@@ -555,9 +614,12 @@ async function answerYesNoQuestions(applicationPage) {
 // candidature" tab: generate the cover letter if needed, attach the three standard documents if
 // missing, answer every yes/no question "Oui", then "Sauvegarder" — never the final submit button.
 async function fillApplicationDraft(applicationPage) {
-  await generateCoverLetterIfNeeded(applicationPage);
+  const coverLetterGeneration = await generateCoverLetterIfNeeded(applicationPage);
   await attachMissingDocuments(applicationPage);
   await answerYesNoQuestions(applicationPage);
+  if (coverLetterGeneration) {
+    await waitForCoverLetterText(applicationPage, coverLetterGeneration.fieldLocator);
+  }
 
   // Unanchored (not /^sauvegarder$/i): confirmed live on the job page's own "Sauvegarder" button
   // that jobup.ch gives these an `aria-label` overriding the visible text (e.g. "Sauvegarder

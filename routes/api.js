@@ -162,7 +162,7 @@ async function runWorkerScript(current, resultsUrl, storageStatePath, jobIndex, 
       String(easyApply),
       String(ignoreYellowMeter)
     ],
-    { timeout: 180000 }
+    { timeout: 300000 }
   );
   if (spawned.stderr) {
     console.error('[jobup-cv-match]', spawned.stderr.trim());
